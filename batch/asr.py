@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import importlib.metadata
+import math
+from pathlib import Path
+import re
+import time
+
+from .common import RATE, ResourceError, atomic_json, blocks, read_json, signature
+
+
+def valid_checkpoint(path, key):
+    try:
+        data = read_json(path)
+        if data and data.get("signature") == key:
+            expected = data.get("checksum")
+            unsigned = {k: v for k, v in data.items() if k != "checksum"}
+            if expected == signature(unsigned):
+                return data
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def checkpoint(path, data):
+    atomic_json(path, {**data, "checksum": signature(data)})
+
+
+def word_key(text):
+    return re.sub(r"\W+", "", text.casefold())
+
+
+def join_blocks(parts):
+    """Midpoint ownership plus a time-constrained alignment at block boundaries.
+
+    Matching overlap words get one canonical instance. Repeated phrases far apart
+    in time are never removed. This is heuristic, so raw block hypotheses remain.
+    """
+    output = []
+    for part in parts:
+        block = part["block"]
+        owned = [dict(word) for word in part["words"]
+                 if block["core_start"] <= (word["start"] + word["end"]) / 2 < block["core_end"]]
+        if output and owned:
+            boundary = block["core_start"]
+            tail = [w for w in output if w["end"] >= boundary - 2]
+            head = [w for w in owned if w["start"] <= boundary + 2]
+            # Longest matching suffix/prefix near the same physical instant.
+            for length in range(min(len(tail), len(head), 12), 0, -1):
+                pairs = list(zip(tail[-length:], head[:length]))
+                if all(word_key(a["text"]) and word_key(a["text"]) == word_key(b["text"])
+                       and min(a["end"], b["end"]) > max(a["start"], b["start"])
+                       for a, b in pairs):
+                    owned = owned[length:]
+                    break
+        output.extend(owned)
+    # Recover words recognized only in a neighbour's context when the owning
+    # block has a gap. Keep conflicting hypotheses in the raw block report.
+    for part in parts:
+        block = part["block"]
+        for word in part["words"]:
+            midpoint = (word["start"] + word["end"]) / 2
+            if block["core_start"] <= midpoint < block["core_end"] or word["end"] <= word["start"]:
+                continue
+            nearby = [w for w in output if w["start"] < word["end"] and w["end"] > word["start"]]
+            if not nearby:
+                output.append({**word, "recovered_from_context": True})
+    return sorted(output, key=lambda item: (item["start"], item["end"]))
+
+
+class ASR:
+    def __init__(self, config, root):
+        self.config, self.root, self.pipe = config, Path(root), None
+
+    def load(self):
+        if self.pipe is None:
+            from transcribe import validate_model
+            validate_model(Path(self.config["model"]))
+            import openvino_genai as genai
+            try:
+                self.pipe = genai.WhisperPipeline(self.config["model"], self.config["device"],
+                    CACHE_DIR=str(self.root / "cache" / "openvino"), word_timestamps=True)
+            except Exception as exc:
+                raise ResourceError("Nie można uruchomić modelu Whisper: " + str(exc)) from exc
+        return self.pipe
+
+    def run(self, pcm, duration, pcm_key, job, work, progress):
+        import numpy as np
+        config = self.config
+        generation = {"task": "transcribe", "return_timestamps": True, "word_timestamps": True,
+                      "language": None if job["language"] == "auto" else f"<|{job['language']}|>"}
+        if config.get("hotwords"):
+            generation["hotwords"] = config["hotwords"]
+        versions = {name: importlib.metadata.version(name) for name in ("openvino", "openvino-genai", "numpy")}
+        base = signature({"pcm": pcm_key, "model": config["model"],
+                          "revision": config["model_revision"], "generation": generation,
+                          "versions": versions, "join_version": 2})
+        parts = []
+        jobs = list(blocks(duration, config["asr_seconds"], config["asr_context"]))
+        audio = None
+        try:
+            for block in jobs:
+                key = signature({"base": base, "block": block})
+                path = Path(work) / "asr" / f"{block['index']:06}.json"
+                part = valid_checkpoint(path, key)
+                if part is None:
+                    progress(f"Whisper: blok {block['index'] + 1}/{len(jobs)} (CPU)", block["index"] / len(jobs) * 100)
+                    offset = round(block["start"] * RATE)
+                    count = round(block["end"] * RATE) - offset
+                    audio = np.memmap(pcm, dtype="<f4", mode="r", offset=offset * 4, shape=(count,))
+                    samples = audio
+                    started = time.perf_counter()
+                    # Exact digital silence needs no inference and cannot hallucinate.
+                    silent = float(np.max(np.abs(samples))) < 1e-7
+                    if silent:
+                        text, segments, words = "", [], []
+                    else:
+                        pipe = self.load()
+                        if generation["language"] and generation["language"] not in pipe.get_generation_config().lang_to_id:
+                            raise ValueError(f"Nieznany kod języka: {job['language']}")
+                        options = pipe.get_generation_config()
+                        for name, value in generation.items():
+                            setattr(options, name, value)
+                        result = pipe.generate(samples, generation_config=options)
+                        text = "".join(result.texts)
+                        def convert(start, end, text):
+                            start, end = float(start), float(end)
+                            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+                                raise RuntimeError("Whisper zwrócił niepełne timestampy. Blok wymaga ponowienia.")
+                            return {"start": min(block["end"], block["start"] + start),
+                                    "end": min(block["end"], block["start"] + end), "text": text}
+                        words = [convert(w.start_ts, w.end_ts, w.word) for w in (result.words or [])]
+                        segments = []
+                        for chunk in result.chunks or []:
+                            # Preserve unknown segment ends without inventing timestamps.
+                            segments.append({"start": block["start"] + float(chunk.start_ts) if chunk.start_ts >= 0 else None,
+                                             "end": block["start"] + float(chunk.end_ts) if chunk.end_ts >= 0 else None,
+                                             "text": chunk.text})
+                        if text.strip() and not words:
+                            raise RuntimeError("Whisper zwrócił tekst bez wymaganych timestampów słów.")
+                    part = {"signature": key, "block": block, "text": text, "words": words,
+                            "segments": segments, "generation": generation, "versions": versions,
+                            "seconds": time.perf_counter() - started, "digital_silence": silent}
+                    checkpoint(path, part)
+                    audio._mmap.close()
+                    audio = None
+                parts.append(part)
+                progress(f"Whisper: zapisano {block['index'] + 1}/{len(jobs)} bloków", (block["index"] + 1) / len(jobs) * 100)
+        finally:
+            if audio is not None:
+                audio._mmap.close()
+        return {"words": join_blocks(parts), "blocks": parts, "generation": generation,
+                "versions": versions, "signature": base}

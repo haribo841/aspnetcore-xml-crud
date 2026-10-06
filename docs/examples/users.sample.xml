@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<ArrayOfUser xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-  <User><Id>1</Id><FirstName>Alicja</FirstName><LastName>Testowa</LastName><Gender>Female</Gender><BirthDate>1995-04-12T00:00:00</BirthDate><TelephoneNumber xsi:nil="true"/><Position>Demo: developer</Position><ShoeSize>38</ShoeSize></User>
-  <User><Id>2</Id><FirstName>Jan</FirstName><LastName>Przykladowy</LastName><Gender>Male</Gender><BirthDate>1992-09-20T00:00:00</BirthDate><TelephoneNumber xsi:nil="true"/><Position>Demo: tester</Position><ShoeSize>42</ShoeSize></User>
-</ArrayOfUser>

@@ -1,54 +1,80 @@
-# ASP.NET Core XML CRUD
+# Kolejka transkrypcji
 
-An ASP.NET Core MVC recruitment exercise with authentication scaffolding and simple user-record CRUD flows. Application records are serialized to a local XML file; this is a learning project, not a production-ready identity or personnel-management system.
+Aplikacja Windows napisana w Pythonie, z oknem Tkinter/ttk. Przetwarza kolejkę filmów YouTube oraz lokalnych nagrań audio i wideo: pobiera audio, opcjonalnie wydziela wokal, transkrybuje lokalnie przez Whisper/OpenVINO i rozróżnia mówców. Postęp zapisuje w SQLite, a ukończone wyniki w TXT, SRT, VTT i JSON.
 
-[Source](https://github.com/haribo841/aspnetcore-xml-crud) | [Setup guide](docs/SETUP.md) | [MIT license](LICENSE) | [Report an issue](https://github.com/haribo841/aspnetcore-xml-crud/issues)
+[Instrukcja obsługi](KOLEJKA.md) | [Walidacja](docs/WERYFIKACJA.md) | [Migracja repozytorium](docs/MIGRACJA.md) | [Licencja MIT](LICENSE)
 
-## Preview and example
+## Funkcje
 
-![The running MVC application showing two fictional XML-backed records](docs/images/user-records.png)
+- Import katalogu YouTube z XLSX, plików lokalnych i folderów z podfolderami. Ponowny import pomija duplikaty i zachowuje ukończone pozycje.
+- Jeden materiał naraz, kolejność chronologiczna, filtry, wybór języka i ścieżki audio.
+- Start/Wznów oraz Dokończ bieżący i zatrzymaj. Zamknięcie okna pozostawia wykonawcę w tle; aplikację można ponownie otworzyć.
+- Punkty wznowienia transkrypcji, diarizacji i UVR. Po awarii ukończone bloki są sprawdzane i wykorzystywane ponownie.
+- Whisper large-v3-turbo przez OpenVINO GenAI na CPU, czasy słów, pyannote Community-1 i opcjonalny UVR przez audio-separator.
+- Opcjonalne zachowanie źródłowego audio i wydzielonego wokalu. Oryginalne pliki lokalne pozostają na miejscu.
+- Nazwy wyników zawierające identyfikator nagrania, zapis atomowy i wersjonowanie przy zajętej nazwie.
+- Karta Obróbka transkrypcji tworząca kopie TXT/SRT/VTT bez etykiet mówców, z zachowanymi czasami i wypowiedziami.
+- Podpowiedzi przycisków, eksport raportu CSV i konfiguracja opcjonalnej sesji YouTube z testem jednego linku.
 
-Actual local application capture with fictional records. The application interface is in Polish. The image demonstrates the XML-backed list only, not a verified login or database deployment.
+Repozytorium zawiera kod i przypięte listy zależności. Modele, środowiska Python, prywatne katalogi filmów, pliki cookies, tokeny i wyniki przetwarzania przygotowuje się lokalnie. Transkrypcja działa bez sterowania oknem Audacity.
 
-Example workflow: open the record list, choose **Dodaj użytkownika**, enter fictional development data, save, and reopen the record using **Edytuj**. The record is persisted in the local `users.xml` file. See [the isolated preview instructions](docs/SETUP.md#isolated-ui-preview) to reproduce the screenshot without using a real database or real personal data.
+## Wymagania
 
-## What it demonstrates
+- Windows 10/11, Python 3.13 dla głównego środowiska oraz Python 3.12 dla mówców i opcjonalnego UVR. Instalatory korzystają z launchera `py`; można podać własne ścieżki do interpreterów.
+- FFmpeg i FFprobe 9 oraz Node.js 22 dostępne w `PATH` albo wskazane pełnymi ścieżkami w ustawieniach.
+- Miejsce na modele oraz audio robocze. Mono PCM 16 kHz zajmuje około 64 kB na sekundę; pozostaw dodatkowe miejsce na UVR i zachowywane nagrania.
+- Internet do jednorazowego pobrania wag i do materiałów YouTube. Community-1 wymaga zaakceptowania warunków modelu oraz tokenu Hugging Face z uprawnieniami Read.
 
-- ASP.NET Core MVC controllers, Razor views, and routing.
-- ASP.NET Core Identity backed by Entity Framework Core and SQL Server.
-- Model validation for user data.
-- XML-based read, create, update, and delete operations through UserXmlService.
+Whisper domyślnie działa na CPU. Osobne środowiska mówców/UVR mają PyTorch CUDA 12.6. Dostępność GPU jest sprawdzana podczas obliczeń; nieudane wykonanie przechodzi na CPU z komunikatem. Wykrycie urządzenia nie gwarantuje zgodności wszystkich modeli i sterowników.
 
-## Quick start
+## Instalacja i pierwsza próba
 
-Requirements: .NET 7 SDK and a local SQL Server instance accessible to the development account.
+W PowerShell otwórz folder sklonowanego repozytorium:
 
-~~~powershell
-dotnet restore
-dotnet user-secrets set "ConnectionStrings:DefaultConnection" "Server=localhost;Database=WebApplication1;Trusted_Connection=True;TrustServerCertificate=True"
-dotnet ef database update
-dotnet run
-~~~
+```powershell
+.\Instaluj-zaleznosci.ps1
+.\.venv\Scripts\python.exe transcribe.py download
+# Opcjonalna separacja wokalu:
+.\Instaluj-UVR.ps1
+.\Uruchom-kolejke.vbs
+```
 
-The migration command requires the matching Entity Framework CLI to be available. See [the setup guide](docs/SETUP.md) for configuration details and data-handling notes.
+Instalatory nie podnoszą wersji bibliotek ponad pliki `requirements-*.lock.txt`. Wariant z własnymi interpreterami:
 
-## Supported platform
+```powershell
+.\Instaluj-zaleznosci.ps1 -AsrInterpreter 'C:\Python313\python.exe' -DiarizationInterpreter 'C:\Python312\python.exe'
+.\Instaluj-UVR.ps1 -Interpreter 'C:\Python312\python.exe'
+```
 
-- ASP.NET Core targeting .NET 7.
-- SQL Server through Entity Framework Core.
-- A modern desktop browser for the MVC interface.
+W oknie wybierz Konfiguracja mówców, zaakceptuj dostęp do [Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), sprawdź token Read i pobierz model. Po pobraniu kliknij Uruchom krótką próbę i wskaż własne nagranie mowy do 2 minut. Sprawdź tekst i etykiety mówców przed dużą sesją. Import nie rozpoczyna pracy; kolejkę uruchamia przycisk Start/Wznów.
 
-## Important limitations
+Domyślny folder danych to `%USERPROFILE%\Transkrypcje`, poza repozytorium. Inny folder wybiera się przez `KOLEJKA_ROOT` przed uruchomieniem albo parametr `--root`:
 
-The Identity configuration requires confirmed accounts, but authorization is not applied consistently across the CRUD routes. The `Home` routes expose XML operations without an authorization attribute. Do not expose this exercise to the internet or use real personal data. The project also targets the unsupported .NET 7 framework and needs a separate modernization and security review before deployment.
+```powershell
+.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transkrypcje' gui
+.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transkrypcje' status
+```
 
-It writes application user records to `users.xml` in the working directory once data is created. Protect database connection strings with user secrets or environment variables, and do not commit generated XML data.
+Nie ma automatycznego przenoszenia wcześniejszej bazy ani gotowych wyników. Istniejący folder danych można wskazać świadomie po sprawdzeniu ścieżek modeli i narzędzi w jego `ustawienia.json`. Jedna baza dopuszcza jednego wykonawcę.
 
-The checked-in development configuration should be overridden locally with a dedicated development database; do not use a system database for application data.
+## YouTube i wyniki
 
-## Documentation, license, and support
+Pobieranie domyślnie działa anonimowo. Gdy YouTube żąda potwierdzenia, Dostęp YouTube pozwala otworzyć link w przeglądarce, wybrać sesję Firefoksa/Chrome/Edge lub lokalny plik Netscape `cookies.txt` i przetestować jeden film. Logowanie wykonuje użytkownik w przeglądarce. Sesja nie gwarantuje usunięcia ograniczenia konta lub adresu IP. [Dokumentacja yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
 
-- [Setup guide](docs/SETUP.md)
-- [Previous README archive](docs/archive/README-2026-09-16.md)
-- [MIT license](LICENSE). Bundled browser libraries retain their [original licenses](docs/THIRD-PARTY.md).
-- Report a reproducible issue without including database strings, accounts, or user data.
+Każde nagranie otrzymuje osobny katalog i nazwy z ID YouTube lub skrótem pliku lokalnego. Stan Gotowe jest nadawany po sprawdzeniu kompletu zapisanych wyników. Rozpoznany tekst, język i mówcy wymagają oceny użytkownika; muzyka, nakładanie głosów i przejścia między blokami mogą powodować błędy.
+
+Lokalne etapy ASR, mówców i UVR nie wysyłają audio do chmury. Cookies oraz token Hugging Face nie powinny trafiać do repozytorium. Wagi modeli i biblioteki mają własne licencje i warunki dostępu.
+
+## Testy i pojedyncza transkrypcja
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe transcribe.py transcribe 'D:\Nagrania\wyklad.mp4' --language auto --word-timestamps
+.\.venv\Scripts\python.exe transcribe.py transcribe --help
+```
+
+Testy używają danych syntetycznych i katalogów tymczasowych. Pobieranie YouTube, model ASR i model mówców są zastępowane kontrolowanymi atrapami; próby FFmpeg używają syntetycznego audio i są pomijane, gdy narzędzia nie są zainstalowane. CI na Windows instaluje główny lockfile i uruchamia tę samą serię offline. Dłuższe testy infrastruktury wymagają jawnego wskazania lokalnego modelu oraz własnej próbki i są opisane w [walidacji](docs/WERYFIKACJA.md).
+
+## Historia
+
+Dawne ćwiczenie ASP.NET Core XML CRUD jest zachowane w [historii Git](https://github.com/haribo841/kolejka-transkrypcji/tree/0b078d310db7922928e4ffe67f9c6121dd16570b). Jego migracja do `Evaluation-tasks/Evaluation-task1`, obok zadań 2 i 3, jest przygotowana lokalnie do publikacji 07.10.2026. Poprzedni README pozostaje w [archiwum](docs/archive/README-aspnetcore-xml-crud-2026-10-06.md). Szczegóły przenoszenia znajdują się w [opisie migracji](docs/MIGRACJA.md).
