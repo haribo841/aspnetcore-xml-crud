@@ -7,7 +7,6 @@ Aplikacja Windows napisana w Pythonie, z oknem Tkinter/ttk. Przetwarza kolejkę 
 ## Funkcje
 
 - Import katalogu YouTube z XLSX, plików lokalnych i folderów z podfolderami. Ponowny import pomija duplikaty i zachowuje ukończone pozycje.
-- Osobne karty Kolejka YouTube i Kolejka lokalna. Start w karcie obejmuje tylko jej nagrania; opcja zaznaczonych ogranicza sesję bez wyłączania innych pozycji.
 - Jeden materiał naraz, kolejność chronologiczna, filtry, wybór języka i ścieżki audio.
 - Start/Wznów oraz Dokończ bieżący i zatrzymaj. Zamknięcie okna pozostawia wykonawcę w tle; aplikację można ponownie otworzyć.
 - Punkty wznowienia transkrypcji, diarizacji i UVR. Po awarii ukończone bloki są sprawdzane i wykorzystywane ponownie.
@@ -58,16 +57,6 @@ Domyślny folder danych to `%USERPROFILE%\Transkrypcje`, poza repozytorium. Inny
 
 Nie ma automatycznego przenoszenia wcześniejszej bazy ani gotowych wyników. Istniejący folder danych można wskazać świadomie po sprawdzeniu ścieżek modeli i narzędzi w jego `ustawienia.json`. Jedna baza dopuszcza jednego wykonawcę.
 
-## Kolejka lokalna
-
-W karcie **Kolejka lokalna** wybierz folder i kliknij **Dodaj folder do kolejki**, albo dodaj pojedyncze pliki. Skrót **Uruchom-kolejke-lokalna.vbs** otwiera tę kartę z ostatnio wybranym folderem. Możesz uwzględnić podfoldery lub ograniczyć import do M4A. Lista, liczniki, raport CSV i ponawianie błędów obejmują wyłącznie lokalne nagrania. Kopie o tym samym SHA-256 zajmują jedną pozycję w kolejce; oryginały i istniejące transkrypcje pozostają na miejscu.
-
-**Start/Wznów lokalne** nie uruchamia materiałów YouTube. Gdy trwa inna sesja, dokończ jej bieżące nagranie i zatrzymaj ją przed przełączeniem. Wznowienie wykorzystuje te same punkty kontrolne i wyniki, a zamknięcie okna nie przerywa wykonawcy. Opcje UVR i zachowywania audio są wspólne dla obu kolejek. Przykład otwarcia karty z wybranym folderem, bez importu lub automatycznego Start:
-
-```powershell
-.\.venv\Scripts\python.exe kolejka.py gui --local-folder 'D:\Nagrania'
-```
-
 ## YouTube i wyniki
 
 Pobieranie domyślnie działa anonimowo. Gdy YouTube żąda potwierdzenia, Dostęp YouTube pozwala otworzyć link w przeglądarce, wybrać sesję Firefoksa/Chrome/Edge lub lokalny plik Netscape `cookies.txt` i przetestować jeden film. Logowanie wykonuje użytkownik w przeglądarce. Sesja nie gwarantuje usunięcia ograniczenia konta lub adresu IP. [Dokumentacja yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
@@ -88,4 +77,4 @@ Testy używają danych syntetycznych i katalogów tymczasowych. Pobieranie YouTu
 
 ## Historia
 
-Dawne ćwiczenie ASP.NET Core XML CRUD jest zachowane w [historii Git](https://github.com/haribo841/kolejka-transkrypcji/tree/0b078d310db7922928e4ffe67f9c6121dd16570b). Jego migrację opublikowano 07.10.2026 w [Evaluation-tasks/Evaluation-task1](https://github.com/haribo841/Evaluation-tasks/tree/025cbdcd308ebb929f53b4b5244f830eec096038/Evaluation-task1), obok zadań 2 i 3. Archiwum zawiera [README dawnego CRUD](docs/archive/README-aspnetcore-xml-crud-2026-10-06.md) oraz [README Kolejki sprzed dodania karty lokalnej](docs/archive/README-kolejka-2026-10-08.md). Szczegóły przenoszenia znajdują się w [opisie migracji](docs/MIGRACJA.md).
+Dawne ćwiczenie ASP.NET Core XML CRUD jest zachowane w [historii Git](https://github.com/haribo841/kolejka-transkrypcji/tree/0b078d310db7922928e4ffe67f9c6121dd16570b). Jego migracja do `Evaluation-tasks/Evaluation-task1`, obok zadań 2 i 3, jest przygotowana lokalnie do publikacji 07.10.2026. Poprzedni README pozostaje w [archiwum](docs/archive/README-aspnetcore-xml-crud-2026-10-06.md). Szczegóły przenoszenia znajdują się w [opisie migracji](docs/MIGRACJA.md).

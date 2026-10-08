@@ -1,6 +1,8 @@
 # Migracja repozytorium
 
-06.10.2026: repozytorium `aspnetcore-xml-crud` otrzymuje nazwę `kolejka-transkrypcji` i kod aplikacji Kolejka transkrypcji. Historia Git i licencja MIT pozostają zachowane. Migracja dawnego ćwiczenia ASP.NET Core XML CRUD do `Evaluation-tasks/Evaluation-task1`, obok ćwiczeń 2 i 3, jest przygotowana lokalnie do publikacji 07.10.2026. Wcześniejsza publikacja migracji została cofnięta zgodnie ze zmianą kolejności wybraną przez właściciela; główna gałąź `Evaluation-tasks` wróciła do stanu sprzed migracji.
+06.10.2026: repozytorium `aspnetcore-xml-crud` otrzymało nazwę `kolejka-transkrypcji` i kod aplikacji Kolejka transkrypcji. Historia Git i licencja MIT pozostają zachowane.
+
+07.10.2026: opublikowano migrację dawnego ćwiczenia ASP.NET Core XML CRUD do `Evaluation-tasks/Evaluation-task1`, obok ćwiczeń 2 i 3, w commicie [025cbdc](https://github.com/haribo841/Evaluation-tasks/commit/025cbdcd308ebb929f53b4b5244f830eec096038). Zachowano historię obu repozytoriów. [GitHub Actions migracji](https://github.com/haribo841/Evaluation-tasks/actions/runs/37591242052) zakończyło build i testy sukcesem.
 
 Poprzedni główny README: [README-aspnetcore-xml-crud-2026-10-06.md](archive/README-aspnetcore-xml-crud-2026-10-06.md). Odnośniki względne w archiwum opisują dawny układ projektu; kompletny kod i dokumentacja CRUD są zachowane w [ostatnim commicie przed zmianą aplikacji](https://github.com/haribo841/kolejka-transkrypcji/tree/0b078d310db7922928e4ffe67f9c6121dd16570b).
 

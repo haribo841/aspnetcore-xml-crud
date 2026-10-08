@@ -101,10 +101,10 @@ HELP = {
     "language": "Ustawia język dla zaznaczonych, nieukończonych nagrań: auto wykrywa język; pl lub en wymusza polski albo angielski. Nie tłumaczy wypowiedzi.",
     "track": "Dla jednego zaznaczonego pliku lokalnego pokazuje dostępne ścieżki audio i pozwala wybrać jedną. Domyślnie używana jest pierwsza.",
     "progress": "Postęp bieżącego etapu jednego filmu. Po przejściu do kolejnego etapu procent zaczyna się od nowa. Ukończone bloki pozostają zapisane.",
-    "start": "Rozpoczyna lub wznawia włączone nagrania od najstarszych. Gotowe materiały są pomijane. Sam filtr listy nie ogranicza zakresu Start.",
+    "start": "Rozpoczyna lub wznawia włączone nagrania YouTube od najstarszych. Pliki lokalne uruchamia się w karcie Kolejka lokalna. Gotowe materiały są pomijane. Sam filtr listy nie ogranicza zakresu Start.",
     "stop": "Zapisuje żądanie zatrzymania po całym bieżącym filmie: pobraniu, UVR, transkrypcji, mówcach i eksporcie. Nie przerywa aktualnego etapu. Następny film nie ruszy.",
     "retry": "Przywraca problematyczne nagrania do oczekujących. Działa na zaznaczonych; bez zaznaczenia obejmuje wszystkie nieudane. Potem naciśnij Start.",
     "results": "Otwiera folder wyników jednego zaznaczonego filmu. Przy wielu zaznaczeniach lub braku zaznaczenia otwiera wspólny folder wyników.",
     "transcript": "Otwiera plik TXT jednego zaznaczonego, ukończonego nagrania. Nazwa pliku zawiera tytuł i identyfikator nagrania.",
-    "selected_only": "Przy Start włącza zaznaczone materiały i wyłącza pozostałe oczekujące. Ten wybór pozostaje w bazie. Aby wrócić do całego katalogu, zaznacz wszystkie i kliknij Włącz do kolejki.",
+    "selected_only": "Ogranicza tę sesję do zaznaczonych nagrań YouTube. Nie wyłącza innych materiałów w bazie. Przy kolejnym Start możesz wrócić do całego katalogu.",
 }

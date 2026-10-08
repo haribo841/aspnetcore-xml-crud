@@ -16,6 +16,44 @@ STATUSES = {
     "blocked": "Blokada YouTube",
 }
 RETRYABLE = ("error", "unavailable", "login_required", "scheduled", "live", "blocked")
+SCOPE_KINDS = ("all", "youtube", "local")
+
+
+def scope_kind(value):
+    if value not in SCOPE_KINDS:
+        raise ValueError("Zakres kolejki musi mieć wartość all, youtube albo local.")
+    return value
+
+
+def scope_ids(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Zakres nagrań musi być listą identyfikatorów.") from exc
+    if not isinstance(value, (list, tuple, set)) or any(type(item) is not int or item <= 0 for item in value):
+        raise ValueError("Zakres nagrań musi zawierać dodatnie całkowite identyfikatory.")
+    return sorted(set(value))
+
+
+def scope_filter(kind, ids, *, enabled=False):
+    """Build a parameterized predicate shared by claiming and scoped retries."""
+    kind, ids = scope_kind(kind), scope_ids(ids)
+    clauses, parameters = [], []
+    if enabled:
+        clauses.append("enabled=1")
+    if kind != "all":
+        clauses.append("kind=?")
+        parameters.append(kind)
+    if ids:
+        clauses.append("id IN (" + ",".join("?" for _ in ids) + ")")
+        parameters.extend(ids)
+    return " AND ".join(clauses) or "1=1", parameters
+
+
+def in_scope(job, control):
+    ids = scope_ids(control["scope_ids"])
+    return (control["scope_kind"] == "all" or job["kind"] == control["scope_kind"]) and (not ids or job["id"] in ids)
 
 
 def now():
@@ -44,7 +82,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS control (
                     id INTEGER PRIMARY KEY CHECK(id=1), stop INTEGER DEFAULT 1,
                     state TEXT DEFAULT 'idle', pid INTEGER, heartbeat TEXT,
-                    current_id INTEGER, message TEXT DEFAULT ''
+                    current_id INTEGER, message TEXT DEFAULT '',
+                    scope_kind TEXT NOT NULL DEFAULT 'all', scope_ids TEXT NOT NULL DEFAULT '[]'
                 );
                 INSERT OR IGNORE INTO control(id) VALUES(1);
                 CREATE TABLE IF NOT EXISTS imports (
@@ -55,6 +94,14 @@ class Store:
                     path TEXT PRIMARY KEY, size INTEGER, mtime_ns INTEGER, sha256 TEXT
                 );
             ''')
+            # Serialize inspection and ALTER: two GUI processes can open an old
+            # database at the same time without racing the same schema change.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(control)")}
+            if "scope_kind" not in columns:
+                db.execute("ALTER TABLE control ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'all'")
+            if "scope_ids" not in columns:
+                db.execute("ALTER TABLE control ADD COLUMN scope_ids TEXT NOT NULL DEFAULT '[]'")
 
     @contextmanager
     def connect(self):
@@ -109,9 +156,13 @@ class Store:
                        (*values.values(), job_id))
 
     def control(self, **values):
-        allowed = {"stop", "state", "pid", "heartbeat", "current_id", "message"}
+        allowed = {"stop", "state", "pid", "heartbeat", "current_id", "message", "scope_kind", "scope_ids"}
         if not values.keys() <= allowed:
             raise ValueError("Niepoprawne pola sterowania.")
+        if "scope_kind" in values:
+            values["scope_kind"] = scope_kind(values["scope_kind"])
+        if "scope_ids" in values:
+            values["scope_ids"] = json.dumps(scope_ids(values["scope_ids"]))
         with self.connect() as db:
             if values:
                 db.execute("UPDATE control SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=1",
@@ -122,10 +173,12 @@ class Store:
         # Stop and claiming the next film are serialized in the same database.
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT stop FROM control WHERE id=1").fetchone()[0]:
+            control = db.execute("SELECT * FROM control WHERE id=1").fetchone()
+            if control["stop"]:
                 return None
-            row = db.execute('''SELECT * FROM jobs WHERE status='pending' AND enabled=1
-                ORDER BY CASE WHEN date='' THEN 1 ELSE 0 END,date,id LIMIT 1''').fetchone()
+            predicate, parameters = scope_filter(control["scope_kind"], control["scope_ids"], enabled=True)
+            row = db.execute("SELECT * FROM jobs WHERE status='pending' AND " + predicate +
+                " ORDER BY CASE WHEN date='' THEN 1 ELSE 0 END,date,id LIMIT 1", parameters).fetchone()
             if not row:
                 return None
             db.execute("UPDATE jobs SET status='running',error='',updated=? WHERE id=?", (now(), row["id"]))
@@ -135,12 +188,27 @@ class Store:
     def recover(self):
         # Call only with the operating-system worker lock held.
         with self.connect() as db:
-            db.execute("UPDATE jobs SET status='pending',stage='Wznawianie' WHERE status='running'")
+            control = db.execute("SELECT * FROM control WHERE id=1").fetchone()
+            predicate, parameters = scope_filter(control["scope_kind"], control["scope_ids"])
+            db.execute("UPDATE jobs SET status='pending',stage='Wznawianie' WHERE status='running' AND " + predicate,
+                       parameters)
 
-    def start(self):
+    def start(self, kind="all", job_ids=None):
+        kind = scope_kind(kind)
+        ids = [] if job_ids is None else scope_ids(job_ids)
+        if job_ids is not None and not ids:
+            raise ValueError("Zaznacz przynajmniej jedno nagranie do uruchomienia.")
+        predicate, parameters = scope_filter(kind, ids, enabled=True)
         with self.connect() as db:
-            db.execute("UPDATE jobs SET status='pending' WHERE status='blocked' OR (status='error' AND stage='Wymaga działania')")
-            db.execute("UPDATE control SET stop=0,message='' WHERE id=1")
+            db.execute("BEGIN IMMEDIATE")
+            if ids:
+                selected = db.execute("SELECT id,kind FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids).fetchall()
+                if len(selected) != len(ids) or any(kind != "all" and row["kind"] != kind for row in selected):
+                    raise ValueError("Wybrane identyfikatory nie należą do wskazanego rodzaju kolejki.")
+            db.execute("UPDATE jobs SET status='pending' WHERE (status='blocked' OR "
+                       "(status='error' AND stage='Wymaga działania')) AND " + predicate, parameters)
+            db.execute("UPDATE control SET stop=0,message='',scope_kind=?,scope_ids=? WHERE id=1",
+                       (kind, json.dumps(ids)))
 
     def retry(self, ids=None):
         with self.connect() as db:
@@ -161,8 +229,12 @@ class Store:
                        " WHERE status NOT IN ('running','done','draft') AND id IN (" +
                        ",".join("?" for _ in ids) + ")", (*values.values(), *ids))
 
-    def export_csv(self, path):
+    def export_csv(self, path, kind=None):
+        if kind is not None:
+            kind = scope_kind(kind)
         rows = self.jobs()
+        if kind is not None and kind != "all":
+            rows = [row for row in rows if row["kind"] == kind]
         with Path(path).open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.writer(stream, delimiter=";")
             writer.writerow(["ID", "Tytuł", "Data", "Typ", "Status", "Etap", "Postęp %", "Błąd", "Źródło", "Wyniki"])

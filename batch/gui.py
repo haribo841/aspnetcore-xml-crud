@@ -12,7 +12,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .common import APP, NO_WINDOW, WorkerLock, application_python, atomic_json, job_folder, read_json, settings
 from .diarization import validate_diarization
-from .importers import MEDIA, import_local, import_xlsx
+from .importers import import_xlsx
+from .local_tab import LocalQueueTab
 from .media import audio_tracks
 from .result_paths import output_paths
 from .store import RETRYABLE, STATUSES, Store
@@ -34,6 +35,7 @@ class Window:
         self.events = queue.Queue()
         self.visible = {}
         self.jobs = {}
+        self.selection_queue = "youtube"
         self.busy_import = False
         self.pending_filter = None
         self.setup_dialog = None
@@ -48,10 +50,12 @@ class Window:
         self.notebook = ttk.Notebook(self.window)
         self.notebook.pack(fill="both", expand=True)
         self.queue_page = ttk.Frame(self.notebook)
+        self.local_page = ttk.Frame(self.notebook)
         self.processing_page = ttk.Frame(self.notebook)
-        self.notebook.add(self.queue_page, text="Kolejka nagrań")
+        self.notebook.add(self.queue_page, text="Kolejka YouTube")
+        self.notebook.add(self.local_page, text="Kolejka lokalna")
         self.notebook.add(self.processing_page, text="Obróbka transkrypcji")
-        Tooltip(self.notebook, "Kolejka nagrań przetwarza audio. Obróbka transkrypcji tworzy kopie gotowych tekstów bez oznaczeń mówców.", self.help_status)
+        Tooltip(self.notebook, "YouTube i nagrania lokalne mają osobne listy i zakres Start. Obróbka transkrypcji tworzy kopie gotowych tekstów bez oznaczeń mówców.", self.help_status)
         outer = ttk.Frame(self.queue_page, padding=12)
         outer.pack(fill="both", expand=True)
         top = ttk.Frame(outer)
@@ -105,7 +109,7 @@ class Window:
             entry.pack(side="left", padx=(0, 12))
             self.add_help(entry, key)
         for key, label, variable, values, width in (("status", "Status", self.status, ["Wszystkie", *STATUSES.values()], 22),
-                                         ("type", "Typ", self.kind, ["Wszystkie", "YouTube", "Lokalne", "Film", "Transmisja", "Shorts"], 14)):
+                                         ("type", "Typ", self.kind, ["Wszystkie", "YouTube", "Film", "Transmisja", "Shorts"], 14)):
             ttk.Label(filter_row, text=label).pack(side="left", padx=(0, 5))
             choice = ttk.Combobox(filter_row, textvariable=variable, values=values, state="readonly", width=width)
             choice.pack(side="left", padx=(0, 12))
@@ -174,7 +178,9 @@ class Window:
         for widget in outer.winfo_children():
             if isinstance(widget, ttk.Label) and int(widget.cget("wraplength") or 0):
                 wrap_with_parent(widget, 24)
+        self.local_tab = LocalQueueTab(self, self.local_page)
         self.transcript_tab = TranscriptTab(self, self.processing_page)
+        self.notebook.bind("<<NotebookTabChanged>>", self.queue_changed)
         self.refresh()
         self.events_after = self.window.after(250, self.consume_events)
 
@@ -194,6 +200,7 @@ class Window:
             self.transcript_tab.on_finished = self.close
             return
         self.transcript_tab.close()
+        self.local_tab.close()
         if self.setup_dialog and not self.setup_dialog.closed:
             self.setup_dialog.close()
         if self.youtube_dialog and not self.youtube_dialog.closed:
@@ -205,7 +212,17 @@ class Window:
                 self.window.after_cancel(callback)
         self.window.destroy()
 
+    def queue_changed(self, event=None):
+        page = self.notebook.select()
+        if page == str(self.local_page):
+            self.selection_queue = "local"
+        elif page == str(self.queue_page):
+            self.selection_queue = "youtube"
+
     def selected(self):
+        self.queue_changed()
+        if self.selection_queue == "local":
+            return self.local_tab.selected()
         return [int(item) for item in self.tree.selection()]
 
     def select_visible(self, event=None):
@@ -228,6 +245,8 @@ class Window:
         selected = set(self.tree.selection())
         wanted = []
         for job in self.jobs.values():
+            if job["kind"] != "youtube":
+                continue
             if self.search.get().casefold() not in (job["title"] + " " + job["identity"]).casefold():
                 continue
             if self.status.get() != "Wszystkie" and STATUSES[job["status"]] != self.status.get():
@@ -265,18 +284,23 @@ class Window:
     def refresh(self):
         rows = self.store.jobs()
         self.jobs = {job["id"]: job for job in rows}
-        counts = Counter(job["status"] for job in rows)
-        enabled = sum(j["status"] == "pending" and j["enabled"] for j in rows)
-        self.counts.set(f"Razem: {len(rows)} | Gotowe: {counts['done']} | Oczekujące: {counts['pending']} (włączone: {enabled}) | Problemy: {sum(counts[s] for s in RETRYABLE)} | Szkice: {counts['draft']}")
+        youtube_rows = [job for job in rows if job["kind"] == "youtube"]
+        counts = Counter(job["status"] for job in youtube_rows)
+        enabled = sum(j["status"] == "pending" and j["enabled"] for j in youtube_rows)
+        self.counts.set(f"YouTube: {len(youtube_rows)} | Gotowe: {counts['done']} | Oczekujące: {counts['pending']} (włączone: {enabled}) | Problemy: {sum(counts[s] for s in RETRYABLE)} | Szkice: {counts['draft']}")
         control = self.store.control()
         job = self.jobs.get(control["current_id"])
         alive = WorkerLock.busy(self.root)
-        if job and alive:
+        scope = job["kind"] if job else control.get("scope_kind", "all")
+        if alive and scope == "local":
+            self.current.set("Trwa kolejka lokalna. Jej postęp i zatrzymanie są dostępne w karcie Kolejka lokalna.")
+            self.progress["value"] = 0
+        elif job and alive:
             suffix = " | Zatrzymam się po tym filmie." if control["stop"] else ""
             self.current.set(f"{job['title']} | {job['stage']}{suffix}")
             self.progress["value"] = job["progress"]
         else:
-            message = control["message"]
+            message = control["message"] if scope != "local" else ""
             if "not a bot" in message.casefold() or "too many requests" in message.casefold():
                 message = error_message(message)
             checking = self.youtube_dialog and self.youtube_dialog.checking and not self.youtube_dialog.closed
@@ -299,10 +323,13 @@ class Window:
         if uvr_state:
             self.model_state.set(self.model_state.get() + " | UVR: " + uvr_state.get("message", "")[:180])
         self.render_list()
+        self.local_tab.refresh(control, alive)
+        self.controls["start"].state(["disabled"] if alive or self.busy_import else ["!disabled"])
+        self.controls["stop"].state(["!disabled"] if alive and scope != "local" else ["disabled"])
         self.refresh_after = self.window.after(1200, self.refresh)
 
     def show_detail(self, event=None):
-        selected = self.selected()
+        selected = [int(item) for item in self.tree.selection()]
         if len(selected) == 1 and selected[0] in self.jobs:
             job = self.jobs[selected[0]]
             try:
@@ -316,34 +343,37 @@ class Window:
         else:
             self.detail.set(f"Zaznaczono: {len(selected)}")
 
-    def background(self, function):
+    def background(self, function, note=None):
         if self.busy_import:
             messagebox.showinfo("Trwa operacja", "Poczekaj na zakończenie bieżącego importu.", parent=self.window)
             return
         self.busy_import = True
         def run():
             try:
-                self.events.put(("result", function()))
+                self.events.put(("result", function(), note))
             except Exception as exc:
-                self.events.put(("error", str(exc)))
+                self.events.put(("error", str(exc), note))
             finally:
                 self.events.put(("finished", None))
         threading.Thread(target=run, daemon=True).start()
 
     def consume_events(self):
         while not self.events.empty():
-            kind, value = self.events.get_nowait()
+            event = self.events.get_nowait()
+            kind, value = event[:2]
+            note = event[2] if len(event) == 3 and event[2] is not None else self.source_note
             if kind == "finished":
                 self.busy_import = False
             elif kind == "error":
+                note.set("Operacja przerwana: " + str(value))
                 messagebox.showerror("Nie udało się wykonać operacji", str(value), parent=self.window)
             elif kind == "progress":
-                self.source_note.set(str(value))
+                note.set(str(value))
             else:
                 if isinstance(value, dict):
-                    self.source_note.set(value.get("note") or f"Import: dodano {value.get('added', 0)}, znaleziono {value.get('files', value.get('rows', 0))}.")
+                    note.set(value.get("note") or f"Import: dodano {value.get('added', 0)}, znaleziono {value.get('files', value.get('rows', 0))}.")
                 else:
-                    self.source_note.set(str(value))
+                    note.set(str(value))
         self.events_after = self.window.after(250, self.consume_events)
 
     def import_catalog(self):
@@ -353,20 +383,19 @@ class Window:
             self.background(lambda: import_xlsx(self.store, path))
 
     def add_files(self):
-        paths = filedialog.askopenfilenames(title="Dodaj nagrania", filetypes=[("Audio i wideo", " ".join("*" + ext for ext in sorted(MEDIA))), ("Wszystkie", "*.*")], parent=self.window)
-        if paths:
-            self.background(lambda: import_local(self.store, paths, lambda message: self.events.put(("progress", message))))
+        self.notebook.select(self.local_page)
+        self.local_tab.add_files()
 
     def add_folder(self):
-        path = filedialog.askdirectory(title="Folder z nagraniami (również podfoldery)", parent=self.window)
-        if path:
-            self.background(lambda: import_local(self.store, [path], lambda message: self.events.put(("progress", message))))
+        self.notebook.select(self.local_page)
+        self.local_tab.choose_folder()
 
-    def enable(self, enabled):
-        self.store.configure(self.selected(), enabled=int(enabled))
+    def enable(self, enabled, ids=None):
+        self.store.configure(self.selected() if ids is None else ids, enabled=int(enabled))
 
-    def language(self):
-        if not self.selected():
+    def language(self, ids=None):
+        ids = self.selected() if ids is None else ids
+        if not ids:
             return
         value = simpledialog.askstring("Język zaznaczonych", "Kod języka, np. pl, en, de lub auto. Nagrania gotowe i bieżące pozostają bez zmian.", initialvalue="auto", parent=self.window)
         if value:
@@ -375,10 +404,10 @@ class Window:
             if value != "auto" and not re.fullmatch(r"[a-z]{2,3}", value):
                 messagebox.showerror("Język", "Podaj kod języka lub auto.", parent=self.window)
                 return
-            self.store.configure(self.selected(), language=value)
+            self.store.configure(ids, language=value)
 
-    def audio_track(self):
-        ids = self.selected()
+    def audio_track(self, ids=None):
+        ids = self.selected() if ids is None else ids
         if len(ids) != 1:
             messagebox.showinfo("Ścieżka audio", "Zaznacz jeden plik lokalny.", parent=self.window)
             return
@@ -395,7 +424,13 @@ class Window:
         except Exception as exc:
             messagebox.showerror("Ścieżka audio", str(exc), parent=self.window)
 
-    def start(self):
+    def start(self, kind="youtube", job_ids=None):
+        if self.busy_import:
+            messagebox.showinfo("Trwa import", "Poczekaj na zakończenie importu przed uruchomieniem kolejki.", parent=self.window)
+            return
+        if WorkerLock.busy(self.root):
+            messagebox.showinfo("Trwa sesja", "Najpierw dokończ bieżące nagranie i zatrzymaj trwającą kolejkę. Start nie zmienia zakresu aktywnej sesji.", parent=self.window)
+            return
         if self.youtube_dialog and self.youtube_dialog.running:
             if not self.youtube_dialog.closed:
                 self.youtube_dialog.dialog.lift()
@@ -409,7 +444,7 @@ class Window:
                 except Exception:
                     self.configure_model()
                     return
-            preflight(self.config, self.root)
+            preflight(self.config, self.root, kind=kind)
             if self.config["diarization"]:
                 test = read_json(self.root / "pierwsza-proba.json", {})
                 if not test.get("passed") or test.get("whisper_revision") != self.config["model_revision"] or test.get("diar_revision") != self.config["diar_revision"]:
@@ -417,32 +452,48 @@ class Window:
                     self.setup_dialog.tabs.select(2)
                     self.setup_dialog.progress_message.set("Przed pierwszym Start wykonaj krótką próbę przyciskiem poniżej. Kolejka filmów pozostanie zatrzymana.")
                     return
-            if self.selected_only.get():
-                ids = self.selected()
-                if not ids:
+            if kind == "youtube" and self.selected_only.get():
+                job_ids = [int(item) for item in self.tree.selection()]
+                if not job_ids:
                     messagebox.showinfo("Start", "Zaznacz materiały do przetworzenia.", parent=self.window)
                     return
-                self.store.configure(list(self.jobs), enabled=0)
-                self.store.configure(ids, enabled=1)
-            launch(self.root)
+            pending = [job for job in self.store.jobs() if job["kind"] == kind and job["enabled"]
+                       and (job["status"] in {"pending", "blocked", "running"}
+                            or (job["status"] == "error" and job["stage"] == "Wymaga działania"))
+                       and (job_ids is None or job["id"] in job_ids)]
+            if not pending:
+                messagebox.showinfo("Kolejka", "Nie ma włączonych nagrań oczekujących w tym zakresie. Nieudane możesz ponowić odpowiednim przyciskiem.", parent=self.window)
+                return
+            launch(self.root, kind=kind, job_ids=job_ids)
         except Exception as exc:
             messagebox.showerror("Kolejka nie została uruchomiona", str(exc), parent=self.window)
 
-    def stop(self):
+    def stop(self, kind="youtube"):
+        control = self.store.control()
+        job = self.store.get(control["current_id"]) if control["current_id"] else None
+        scope = job["kind"] if job else control.get("scope_kind", "all")
+        if WorkerLock.busy(self.root) and scope not in {kind, "all"}:
+            messagebox.showinfo("Inna kolejka", "Użyj zatrzymania w karcie trwającej kolejki.", parent=self.window)
+            return
         self.store.control(stop=1)
 
-    def retry(self):
-        count = self.store.retry(self.selected() or None)
-        self.source_note.set(f"Przywrócono do oczekujących: {count}. Naciśnij Start/Wznów.")
+    def retry(self, kind="youtube", ids=None):
+        candidates = [job["id"] for job in self.store.jobs() if job["kind"] == kind]
+        if ids is None:
+            ids = [int(item) for item in self.tree.selection()]
+        scoped = [ident for ident in ids if ident in candidates] if ids else candidates
+        count = self.store.retry(scoped) if scoped else 0
+        note = self.local_tab.note if kind == "local" else self.source_note
+        note.set(f"Przywrócono do oczekujących: {count}. Naciśnij Start/Wznów.")
 
-    def open_results(self):
-        ids = self.selected()
+    def open_results(self, ids=None):
+        ids = self.selected() if ids is None else ids
         path = job_folder(self.root, self.jobs[ids[0]]) if len(ids) == 1 else self.root / "wyniki"
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(path)
 
-    def open_transcript(self):
-        ids = self.selected()
+    def open_transcript(self, ids=None):
+        ids = self.selected() if ids is None else ids
         if len(ids) != 1 or self.jobs[ids[0]]["status"] != "done":
             messagebox.showinfo("Transkrypcja", "Zaznacz jedno nagranie ze statusem Gotowe.", parent=self.window)
             return
@@ -452,10 +503,11 @@ class Window:
         except (ValueError, OSError, TypeError) as exc:
             messagebox.showerror("Nie udało się otworzyć transkrypcji", str(exc), parent=self.window)
 
-    def report(self):
+    def report(self, kind="youtube"):
         path = filedialog.asksaveasfilename(title="Raport do Excela", defaultextension=".csv", initialfile="postep.csv", filetypes=[("CSV", "*.csv")], parent=self.window)
         if path:
-            self.background(lambda: (self.store.export_csv(path), f"Zapisano raport: {path}")[1])
+            note = self.local_tab.note if kind == "local" else self.source_note
+            self.background(lambda: (self.store.export_csv(path, kind=kind), f"Zapisano raport: {path}")[1], note=note)
 
     def setup_process(self, request):
         if WorkerLock.busy(self.root / "konfiguracja"):
@@ -568,7 +620,9 @@ class Window:
                 content.insert("end", HELP[key] + "\n")
         content.insert("end", "\nZamknięcie okna nie przerywa rozpoczętej pracy. Najedź na element okna lub użyj Tab i F1, aby wyświetlić podpowiedź.\n")
         content.insert("end", "Obróbka transkrypcji\n", "heading")
-        content.insert("end", "Druga karta usuwa etykiety mówców z gotowych TXT, SRT i VTT. Dodaj pliki lub wybierz Wszystkie gotowe, sprawdź podgląd i zapisz kopie. Timestampy oraz wypowiedzi pozostają bez zmian. Domyślny folder kopii to obrobione; oryginały pozostają zachowane.\n")
+        content.insert("end", "Karta Obróbka transkrypcji usuwa etykiety mówców z gotowych TXT, SRT i VTT. Dodaj pliki lub wybierz Wszystkie gotowe, sprawdź podgląd i zapisz kopie. Timestampy oraz wypowiedzi pozostają bez zmian. Domyślny folder kopii to obrobione; oryginały pozostają zachowane.\n")
+        content.insert("end", "Kolejka lokalna\n", "heading")
+        content.insert("end", "Wybierz folder, ustaw podfoldery lub tylko M4A i kliknij Dodaj folder do kolejki. Import porównuje SHA-256, pomija identyczne kopie i nie uruchamia obliczeń. Start/Wznów lokalne obejmuje tylko pliki lokalne, nigdy katalog YouTube. Opcja Start tylko zaznaczonych ogranicza sesję bez wyłączania innych materiałów. Jeden wykonawca obsługuje jedną sesję; aby zmienić kolejkę, dokończ bieżące nagranie i zatrzymaj. Wyniki i punkty wznowienia pozostają w tej samej bazie.\n")
         content.configure(state="disabled")
         Tooltip(content, "Przewijaj kółkiem myszy lub klawiszami Page Up / Page Down. Tekst możesz zaznaczyć i skopiować.")
         help_button(frame, "Zamknij pomoc", dialog.destroy, "Wraca do kolejki bez zmiany jej stanu.").pack(anchor="e", pady=(10, 0))

@@ -38,7 +38,7 @@ class TranscriptTab:
         toolbar.pack(fill="x")
         for text, command, hint in (
                 ("Dodaj pliki TXT / SRT / VTT", self.pick_files, "Wybierz jedną lub wiele gotowych transkrypcji. Obsługiwane są TXT z czasami oraz napisy SRT i VTT."),
-                ("Zaznaczone z kolejki", lambda: self.from_queue(True), "Dodaje transkrypcje TXT gotowych nagrań zaznaczonych w karcie Kolejka nagrań."),
+                ("Zaznaczone z kolejki", lambda: self.from_queue(True), "Dodaje transkrypcje TXT gotowych nagrań zaznaczonych w ostatnio używanej karcie Kolejka YouTube lub Kolejka lokalna."),
                 ("Wszystkie gotowe", lambda: self.from_queue(False), "Dodaje transkrypcje TXT wszystkich ukończonych nagrań. Samo dodanie nie zapisuje jeszcze kopii."),
                 ("Usuń z listy", self.remove_selected, "Usuwa zaznaczone pozycje wyłącznie z tej listy. Nie usuwa żadnych plików z dysku."),
                 ("Wyczyść listę", self.clear, "Opróżnia listę do obróbki. Oryginały i zapisane kopie pozostają na dysku.")):
@@ -137,7 +137,7 @@ class TranscriptTab:
     def from_queue(self, selected):
         ids = set(self.app.selected()) if selected else None
         if selected and not ids:
-            self.status.set("Najpierw zaznacz gotowe nagrania w karcie Kolejka nagrań.")
+            self.status.set("Najpierw zaznacz gotowe nagrania w karcie Kolejka YouTube lub Kolejka lokalna.")
             return
         paths, missing = [], 0
         for job in self.app.store.jobs():

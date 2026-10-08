@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -19,20 +20,27 @@ from .exporter import export, verify_outputs
 from .result_paths import assert_output_owner
 from .media import MediaError, decode, download
 from .speakers import assign_words, cues_from_words, merge_speakers
-from .store import Store, now
+from .store import Store, in_scope, now, scope_kind
 from .uvr import archive_source, separate, validate_uvr
 from .youtube_access import preferences as youtube_preferences
 
 
-def preflight(config, root):
+def preflight(config, root, kind="all"):
+    kind = scope_kind(kind)
     from transcribe import validate_model
     try:
         validate_model(Path(config["model"]))
     except Exception as exc:
         raise ResourceError("Model Whisper nie jest gotowy: " + str(exc)) from exc
-    for name in ("ffmpeg", "ffprobe", "node"):
-        if not Path(config[name]).is_file():
+    for name in (("ffmpeg", "ffprobe") if kind == "local" else ("ffmpeg", "ffprobe", "node")):
+        candidate = str(config[name])
+        if not Path(candidate).is_file() and Path(candidate).name == candidate:
+            resolved = shutil.which(candidate)
+            if resolved:
+                candidate = resolved
+        if not Path(candidate).is_file():
             raise ResourceError(f"Brak programu {name}: {config[name]}")
+        config[name] = candidate
     if config["diarization"]:
         validate_diarization(config)
     if config.get("uvr_enabled"):
@@ -139,10 +147,13 @@ class Worker:
             # Outputs are valid. Keep evidence of cleanup failure, retry next start.
             self.store.update(job["id"], error="Wyniki gotowe; sprzątanie wymaga ponowienia: " + str(exc))
 
-    def run(self, check=True, max_jobs=None):
-        lock = WorkerLock(self.root)
-        if not lock.acquire():
-            return False
+    def run(self, check=True, max_jobs=None, *, _held_lock=None):
+        lock = _held_lock or WorkerLock(self.root)
+        if _held_lock is None:
+            if not lock.acquire():
+                return False
+        elif lock.stream is None or lock.path.resolve() != (self.root / "worker.lock").resolve():
+            raise ValueError("Niepoprawna przekazana blokada wykonawcy.")
         heartbeat_stop = threading.Event()
         def heartbeat():
             while not heartbeat_stop.wait(5):
@@ -151,11 +162,12 @@ class Worker:
         try:
             self.store.control(state="running", pid=os.getpid(), heartbeat=now(), message="")
             self.store.recover()
+            scope = self.store.control()
             if check:
-                preflight(self.config, self.root)
+                preflight(self.config, self.root, kind=scope["scope_kind"])
             # Retry only cleanup of verified completed jobs, never inference.
             for job in self.store.jobs():
-                if job["status"] == "done":
+                if job["status"] == "done" and in_scope(job, scope):
                     folder = job_folder(self.root, job)
                     work = folder / "robocze"
                     leftovers = (work / "audio.f32le").exists() or any(p.suffix != ".json" for p in work.glob("download.*"))
@@ -201,15 +213,66 @@ class Worker:
         return True
 
 
-def launch(root):
-    store = Store(root)
-    # Clicking Start is the only normal way to clear a stop request.
-    store.start()
-    if WorkerLock.busy(root):
-        return None
-    log_path = Path(root) / "worker.log"
-    python = application_python()
-    with log_path.open("ab", buffering=0) as log:
-        return subprocess.Popen([str(python), str(APP / "kolejka.py"), "--root", str(root), "worker"],
-            cwd=APP, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-            creationflags=NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0), close_fds=True)
+def _finish_launch(root, process, launch_lock):
+    """Keep the launch gate until the child owns worker.lock, without blocking Tk."""
+    try:
+        limit = time.monotonic() + 10
+        while not WorkerLock.busy(root):
+            code = process.poll()
+            if code is not None:
+                if code:
+                    Store(root).control(stop=1, message="Proces kolejki nie uruchomił się. Sprawdź worker.log i wznów ręcznie.")
+                return
+            if time.monotonic() >= limit:
+                process.terminate()
+                process.wait(timeout=5)
+                Store(root).control(stop=1, message="Uruchamianie wykonawcy przekroczyło czas oczekiwania. Wznów kolejkę ręcznie.")
+                return
+            time.sleep(.02)
+    finally:
+        launch_lock.close()
+
+
+def wait_for_launch(root, timeout=10):
+    """Keep a short-lived CLI parent alive until startup has been acknowledged."""
+    limit = time.monotonic() + timeout
+    while WorkerLock.busy(Path(root) / "uruchamianie"):
+        if time.monotonic() >= limit:
+            raise ResourceError("Wykonawca nie potwierdził uruchomienia. Sprawdź worker.log przed kolejnym Start.")
+        time.sleep(.02)
+
+
+def launch(root, *, kind="all", job_ids=None):
+    root = Path(root).resolve()
+    kind = scope_kind(kind)
+    launch_lock = WorkerLock(root / "uruchamianie")
+    if not launch_lock.acquire():
+        raise ResourceError("Wykonawca jest już uruchamiany. Poczekaj, aż pojawi się jego stan.")
+    worker_lock = WorkerLock(root)
+    started, store = False, None
+    try:
+        # Acquire before writing the scope: a live worker's stop request and
+        # current selection must never be replaced by another Start click.
+        if not worker_lock.acquire():
+            raise ResourceError("Kolejka już pracuje. Dokończ bieżące nagranie i zatrzymaj ją przed zmianą rodzaju lub zakresu.")
+        store = Store(root)
+        store.start(kind=kind, job_ids=job_ids)
+        started = True
+        log_path = root / "worker.log"
+        with log_path.open("ab", buffering=0) as log:
+            process = subprocess.Popen([application_python(), str(APP / "kolejka.py"), "--root", str(root),
+                "worker", "--wait-for-launch"], cwd=APP, stdout=log, stderr=log,
+                stdin=subprocess.DEVNULL, creationflags=NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0),
+                close_fds=True)
+    except Exception:
+        if started:
+            store.control(stop=1, message="Nie udało się uruchomić wykonawcy. Popraw przyczynę i wznów ręcznie.")
+        launch_lock.close()
+        raise
+    finally:
+        worker_lock.close()
+    if process.poll() is not None:
+        launch_lock.close()
+    else:
+        threading.Thread(target=_finish_launch, args=(root, process, launch_lock), daemon=True).start()
+    return process
