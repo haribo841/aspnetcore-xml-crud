@@ -122,7 +122,7 @@ class DownloadTests(unittest.TestCase):
             with patch("batch.media.youtube_client") as client, patch("batch.media.wait_before_youtube") as wait:
                 result = download({"identity": "yt:abcdefghijk", "source": URL}, work, defaults(), lambda *_: None,
                                   dict(DEFAULTS, mode="file", cookie_file="missing.txt"))
-            self.assertEqual(result, audio)
+            self.assertEqual(result, audio.resolve())
             client.assert_not_called()
             wait.assert_not_called()
 
@@ -130,8 +130,9 @@ class DownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch("batch.media.wait_before_youtube"), \
                 patch("batch.media.youtube_client") as client:
             client.return_value.__enter__.side_effect = RuntimeError("Sign in to confirm you're not a bot " + COOKIE_VALUE)
+            job, work, config = {"identity": "yt:abcdefghijk", "source": URL}, Path(tmp), defaults()
             with self.assertRaises(MediaError) as caught:
-                download({"identity": "yt:abcdefghijk", "source": URL}, Path(tmp), defaults(), lambda *_: None)
+                download(job, work, config, lambda *_: None)
             self.assertEqual(caught.exception.status, "blocked")
             self.assertNotIn(COOKIE_VALUE, str(caught.exception))
             self.assertEqual(client.call_count, 1)

@@ -49,9 +49,50 @@ def duration_seconds(value):
     return None
 
 
+def catalog_header(sheet):
+    for row in sheet.iter_rows(min_row=1, max_row=min(100, sheet.max_row)):
+        names = {str(cell.value).strip().casefold(): i for i, cell in enumerate(row) if cell.value is not None}
+        if {"tytuł", "link", "id filmu"} <= names.keys():
+            return names, row[0].row
+    raise ValueError("Nie znaleziono nagłówków Tytuł, Link i ID filmu.")
+
+
+def catalog_value(row, header, name, default=""):
+    index = header.get(name.casefold())
+    if index is None or row[index].value is None:
+        return default
+    return row[index].value
+
+
+def catalog_entry(row, header, source, epoch):
+    from openpyxl.utils.datetime import from_excel
+    title = str(catalog_value(row, header, "Tytuł")).strip()
+    if not title:
+        return None
+    cell = row[header["link"]]
+    link = cell.hyperlink.target if cell.hyperlink and cell.hyperlink.target else catalog_value(row, header, "Link")
+    ident = video_id(link, catalog_value(row, header, "ID filmu"))
+    date_value = catalog_value(row, header, "Data")
+    if isinstance(date_value, (int, float)):
+        date_value = from_excel(date_value, epoch)
+    date_text = date_value.isoformat() if isinstance(date_value, (datetime, date)) else str(date_value)
+    meta = {"catalog": str(source), "row": row[0].row, "ordinal": catalog_value(row, header, "Lp."),
+            "kind": str(catalog_value(row, header, "Typ")), "source_status": str(catalog_value(row, header, "Status")),
+            "date_meaning": str(catalog_value(row, header, "Znaczenie daty"))}
+    if ident:
+        identity, status = "yt:" + ident, "pending"
+    else:
+        key = hashlib.sha256(f"{source.name}|{meta['ordinal']}|{title}".encode()).hexdigest()[:24]
+        identity, status = "draft:" + key, "draft"
+    return {"identity": identity, "kind": "youtube", "title": title,
+            "source": "https://www.youtube.com/watch?v=" + ident if ident else "",
+            "date": date_text, "visibility": str(catalog_value(row, header, "Widoczność")),
+            "duration": duration_seconds(catalog_value(row, header, "Długość", None)), "meta": meta,
+            "status": status}
+
+
 def import_xlsx(store, source):
     from openpyxl import load_workbook
-    from openpyxl.utils.datetime import from_excel
 
     source = Path(source).resolve(strict=True)
     before = digest(source)
@@ -61,47 +102,14 @@ def import_xlsx(store, source):
         if "Materiały" not in workbook.sheetnames:
             raise ValueError("Brak arkusza Materiały.")
         sheet = workbook["Materiały"]
-        header, header_row = None, None
-        for row in sheet.iter_rows(min_row=1, max_row=min(100, sheet.max_row)):
-            names = {str(cell.value).strip().casefold(): i for i, cell in enumerate(row) if cell.value is not None}
-            if {"tytuł", "link", "id filmu"} <= names.keys():
-                header, header_row = names, row[0].row
-                break
-        if header is None:
-            raise ValueError("Nie znaleziono nagłówków Tytuł, Link i ID filmu.")
+        header, header_row = catalog_header(sheet)
         result = []
         drafts = 0
         for row in sheet.iter_rows(min_row=header_row + 1):
-            def get(name, default=""):
-                index = header.get(name.casefold())
-                return row[index].value if index is not None and row[index].value is not None else default
-            title = str(get("Tytuł")).strip()
-            if not title:
-                continue
-            link = get("Link")
-            cell = row[header["link"]]
-            if cell.hyperlink and cell.hyperlink.target:
-                link = cell.hyperlink.target
-            ident = video_id(link, get("ID filmu"))
-            date_value = get("Data")
-            if isinstance(date_value, (int, float)):
-                date_value = from_excel(date_value, workbook.epoch)
-            date_text = date_value.isoformat() if isinstance(date_value, (datetime, date)) else str(date_value)
-            meta = {"catalog": str(source), "row": row[0].row, "ordinal": get("Lp."),
-                    "kind": str(get("Typ")), "source_status": str(get("Status")),
-                    "date_meaning": str(get("Znaczenie daty"))}
-            if not ident:
-                drafts += 1
-                # Stable across a repeated import of the same source table.
-                key = hashlib.sha256(f"{source.name}|{get('Lp.')}|{title}".encode()).hexdigest()[:24]
-                identity, status = "draft:" + key, "draft"
-            else:
-                identity, status = "yt:" + ident, "pending"
-            result.append({"identity": identity, "kind": "youtube", "title": title,
-                           "source": "https://www.youtube.com/watch?v=" + ident if ident else "",
-                           "date": date_text, "visibility": str(get("Widoczność")),
-                           "duration": duration_seconds(get("Długość", None)), "meta": meta,
-                           "status": status})
+            entry = catalog_entry(row, header, source, workbook.epoch)
+            if entry is not None:
+                result.append(entry)
+                drafts += entry["status"] == "draft"
     finally:
         workbook.close()
     if digest(source) != before:

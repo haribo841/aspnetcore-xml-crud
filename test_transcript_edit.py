@@ -40,8 +40,9 @@ class ResultNamingTests(unittest.TestCase):
     def test_another_recording_cannot_overwrite_an_existing_folder(self):
         first = export(self.root, report(), "one")
         before = {p.name: p.read_bytes() for p in self.root.iterdir()}
+        second_report = report("yt:abcdefghijl")
         with self.assertRaises(FileExistsError):
-            export(self.root, report("yt:abcdefghijl"), "two")
+            export(self.root, second_report, "two")
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.root.iterdir()})
         self.assertTrue(first["txt"].is_file())
 
@@ -59,9 +60,10 @@ class ResultNamingTests(unittest.TestCase):
     def test_failed_reexport_preserves_the_last_complete_manifest(self):
         export(self.root, report(), "old")
         manifest = (self.root / "gotowe.json").read_bytes()
+        updated_report = report()
         with patch("batch.exporter.atomic_new_bytes", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
-                export(self.root, report(), "new")
+                export(self.root, updated_report, "new")
         self.assertEqual(manifest, (self.root / "gotowe.json").read_bytes())
         self.assertTrue(verify_outputs(self.root, report()["identity"], "old"))
 

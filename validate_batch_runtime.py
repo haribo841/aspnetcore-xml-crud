@@ -18,6 +18,9 @@ from batch.store import Store
 from batch.worker import launch
 
 
+SETTINGS_FILE = 'ustawienia.json'
+
+
 def wait_for(predicate, timeout=120):
     limit = time.monotonic() + timeout
     while time.monotonic() < limit:
@@ -63,7 +66,7 @@ def window_reconnect(root, sample, model):
     root = root / 'gui-reconnect'
     config = settings(root)
     config.update(diarization=False, asr_seconds=7, asr_context=1, model=str(model))
-    atomic_json(root / 'ustawienia.json', config)
+    atomic_json(root / SETTINGS_FILE, config)
     store = Store(root)
     import_local(store, [sample])
     before = digest(sample)
@@ -94,7 +97,7 @@ def crash_resume(root, sample_source, model):
     root = root / 'crash-resume'
     config = settings(root)
     config.update(diarization=False, asr_seconds=8, asr_context=1, model=str(model))
-    atomic_json(root / 'ustawienia.json', config)
+    atomic_json(root / SETTINGS_FILE, config)
     sample = root / 'repeated.wav'
     if not sample.exists():
         subprocess.run([config['ffmpeg'], '-hide_banner', '-loglevel', 'error', '-y', '-stream_loop', '7',
@@ -154,7 +157,7 @@ def long_silence(root, _sample, model):
     config = settings(root)
     config['diarization'] = False
     config['model'] = str(model)
-    atomic_json(root / 'ustawienia.json', config)
+    atomic_json(root / SETTINGS_FILE, config)
     source = root / 'silence-3h.flac'
     subprocess.run([config['ffmpeg'], '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
         '-i', 'anullsrc=r=16000:cl=mono', '-t', '10800', '-c:a', 'flac', str(source)],

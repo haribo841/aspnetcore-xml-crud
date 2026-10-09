@@ -3,6 +3,9 @@ from pathlib import Path
 
 from .common import atomic_new_bytes, atomic_json, digest, read_json, signature, slug
 
+
+RESULT_MANIFEST = 'gotowe.json'
+
 EXTENSIONS = ("txt", "srt", "vtt", "json")
 LEGACY_OUTPUTS = tuple("transkrypcja." + extension for extension in EXTENSIONS)
 
@@ -20,7 +23,7 @@ def output_stem(title, identity):
 
 def output_paths(folder, manifest=None):
     folder = Path(folder)
-    manifest = read_json(folder / "gotowe.json", {}) if manifest is None else manifest
+    manifest = read_json(folder / RESULT_MANIFEST, {}) if manifest is None else manifest
     if not isinstance(manifest, dict):
         raise ValueError("Niepoprawny manifest wyników nagrania.")
     names = manifest.get("outputs", dict(zip(EXTENSIONS, LEGACY_OUTPUTS)))
@@ -39,7 +42,7 @@ def output_paths(folder, manifest=None):
 
 def assert_output_owner(folder, identity):
     folder = Path(folder)
-    manifest = read_json(folder / "gotowe.json", {})
+    manifest = read_json(folder / RESULT_MANIFEST, {})
     if manifest and manifest.get("identity") != identity:
         raise FileExistsError("Katalog zawiera wyniki innego nagrania. Zachowano dotychczasowe pliki: " + str(folder))
     legacy = read_json(folder / "transkrypcja.json", {})
@@ -63,7 +66,7 @@ def upgrade_output_names(folder, identity):
     folder = Path(folder)
     if not verify_outputs(folder, identity):
         raise ValueError("Nie można zmienić nazw niekompletnych lub zmodyfikowanych wyników: " + str(folder))
-    manifest = read_json(folder / "gotowe.json")
+    manifest = read_json(folder / RESULT_MANIFEST)
     if "outputs" in manifest:
         return output_paths(folder, manifest)
     old = output_paths(folder, manifest)
@@ -75,7 +78,7 @@ def upgrade_output_names(folder, identity):
             raise OSError("Sprawdzenie kopii wyniku nie powiodło się.")
     manifest.update(format_version=2, outputs={ext: path.name for ext, path in paths.items()},
                     legacy_files=manifest["files"], files={path.name: digest(path) for path in paths.values()})
-    atomic_json(folder / "gotowe.json", manifest)
+    atomic_json(folder / RESULT_MANIFEST, manifest)
     if not verify_outputs(folder, identity):
         raise OSError("Sprawdzenie nazwanych wyników nie powiodło się.")
     return paths

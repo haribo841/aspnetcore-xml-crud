@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from .paths import output_file
 import sqlite3
 
 from .common import slug
@@ -17,6 +18,8 @@ STATUSES = {
 }
 RETRYABLE = ("error", "unavailable", "login_required", "scheduled", "live", "blocked")
 SCOPE_KINDS = ("all", "youtube", "local")
+BEGIN_WRITE = "BEGIN IMMEDIATE"
+SELECT_CONTROL = "SELECT * FROM control WHERE id=1"
 
 
 def scope_kind(value):
@@ -96,7 +99,7 @@ class Store:
             ''')
             # Serialize inspection and ALTER: two GUI processes can open an old
             # database at the same time without racing the same schema change.
-            db.execute("BEGIN IMMEDIATE")
+            db.execute(BEGIN_WRITE)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(control)")}
             if "scope_kind" not in columns:
                 db.execute("ALTER TABLE control ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'all'")
@@ -167,13 +170,13 @@ class Store:
             if values:
                 db.execute("UPDATE control SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=1",
                            tuple(values.values()))
-            return dict(db.execute("SELECT * FROM control WHERE id=1").fetchone())
+            return dict(db.execute(SELECT_CONTROL).fetchone())
 
     def claim(self):
         # Stop and claiming the next film are serialized in the same database.
         with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            control = db.execute("SELECT * FROM control WHERE id=1").fetchone()
+            db.execute(BEGIN_WRITE)
+            control = db.execute(SELECT_CONTROL).fetchone()
             if control["stop"]:
                 return None
             predicate, parameters = scope_filter(control["scope_kind"], control["scope_ids"], enabled=True)
@@ -188,7 +191,7 @@ class Store:
     def recover(self):
         # Call only with the operating-system worker lock held.
         with self.connect() as db:
-            control = db.execute("SELECT * FROM control WHERE id=1").fetchone()
+            control = db.execute(SELECT_CONTROL).fetchone()
             predicate, parameters = scope_filter(control["scope_kind"], control["scope_ids"])
             db.execute("UPDATE jobs SET status='pending',stage='Wznawianie' WHERE status='running' AND " + predicate,
                        parameters)
@@ -200,7 +203,7 @@ class Store:
             raise ValueError("Zaznacz przynajmniej jedno nagranie do uruchomienia.")
         predicate, parameters = scope_filter(kind, ids, enabled=True)
         with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+            db.execute(BEGIN_WRITE)
             if ids:
                 selected = db.execute("SELECT id,kind FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids).fetchall()
                 if len(selected) != len(ids) or any(kind != "all" and row["kind"] != kind for row in selected):
@@ -230,12 +233,13 @@ class Store:
                        ",".join("?" for _ in ids) + ")", (*values.values(), *ids))
 
     def export_csv(self, path, kind=None):
+        path = output_file(path, suffix=".csv")
         if kind is not None:
             kind = scope_kind(kind)
         rows = self.jobs()
         if kind is not None and kind != "all":
             rows = [row for row in rows if row["kind"] == kind]
-        with Path(path).open("w", encoding="utf-8-sig", newline="") as stream:
+        with path.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.writer(stream, delimiter=";")
             writer.writerow(["ID", "Tytuł", "Data", "Typ", "Status", "Etap", "Postęp %", "Błąd", "Źródło", "Wyniki"])
             for job in rows:

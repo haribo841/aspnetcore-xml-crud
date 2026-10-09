@@ -66,6 +66,28 @@ def youtube_domain(domain):
     return domain == "youtube.com" or domain.endswith(".youtube.com")
 
 
+def parse_cookie(line):
+    http_only = line.startswith("#HttpOnly_")
+    if http_only:
+        line = line[len("#HttpOnly_"):]
+    elif not line.strip() or line.startswith("#"):
+        return None
+    fields = line.split("\t")
+    if len(fields) != 7:
+        raise ValueError()
+    domain, subdomains, cookie_path, secure, expires, name, value = fields
+    if subdomains not in {"TRUE", "FALSE"} or secure not in {"TRUE", "FALSE"} or not cookie_path.startswith("/"):
+        raise ValueError()
+    if expires and not re.fullmatch(r"\d+(?:\.\d+)?", expires):
+        raise ValueError()
+    expiration = int(float(expires)) if expires else 0
+    if not youtube_domain(domain) or (expiration and expiration <= time.time()):
+        return None
+    return Cookie(0, name, value, None, False, domain, subdomains == "TRUE",
+                  domain.startswith("."), cookie_path, True, secure == "TRUE", expiration or None,
+                  not expiration, None, None, {"HttpOnly": None} if http_only else {}, False)
+
+
 def file_cookies(path):
     from yt_dlp.cookies import YoutubeDLCookieJar
     path = Path(path)
@@ -74,33 +96,16 @@ def file_cookies(path):
             raise SessionError("Nie znaleziono wybranego pliku cookies. Wskaż go ponownie w Dostęp YouTube.")
         if path.stat().st_size > 10 * 1024 * 1024:
             raise SessionError("Plik cookies jest za duży. Wyeksportuj tylko cookies witryny youtube.com.")
-        text = path.read_text(encoding="utf-8-sig")
-        lines = text.splitlines()
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
         if not lines or lines[0].strip() not in {"# Netscape HTTP Cookie File", "# HTTP Cookie File"}:
             raise ValueError()
         jar = YoutubeDLCookieJar()
         for line in lines[1:]:
-            http_only = line.startswith("#HttpOnly_")
-            if http_only:
-                line = line[len("#HttpOnly_"):]
-            elif not line.strip() or line.startswith("#"):
-                continue
-            fields = line.split("\t")
-            if len(fields) != 7:
-                raise ValueError()
-            domain, subdomains, cookie_path, secure, expires, name, value = fields
-            if subdomains not in {"TRUE", "FALSE"} or secure not in {"TRUE", "FALSE"} or not cookie_path.startswith("/"):
-                raise ValueError()
-            if expires and not re.fullmatch(r"\d+(?:\.\d+)?", expires):
-                raise ValueError()
-            expiration = int(float(expires)) if expires else 0
-            if not youtube_domain(domain) or (expiration and expiration <= time.time()):
-                continue
-            jar.set_cookie(Cookie(0, name, value, None, False, domain, subdomains == "TRUE",
-                domain.startswith("."), cookie_path, True, secure == "TRUE", expiration or None,
-                not expiration, None, None, {"HttpOnly": None} if http_only else {}, False))
+            cookie = parse_cookie(line)
+            if cookie is not None:
+                jar.set_cookie(cookie)
         return jar
-    except (ValueError, UnicodeError, OverflowError):
+    except (ValueError, OverflowError):
         raise SessionError("Niepoprawny plik cookies. Potrzebny jest eksport youtube.com w formacie Netscape cookies.txt, nie JSON ani token Hugging Face.") from None
     except OSError:
         raise SessionError("Nie można odczytać wybranego pliku cookies. Sprawdź ścieżkę i dostęp do pliku.") from None

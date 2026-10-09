@@ -17,7 +17,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["DO_NOT_TRACK"] = "1"
 os.environ["OTEL_SDK_DISABLED"] = "true"
 
-from .asr import checkpoint, valid_checkpoint
+from .asr import checkpoint, pcm_samples, valid_checkpoint
 from .common import RATE, atomic_json, blocks, digest, read_json, signature
 
 
@@ -53,86 +53,105 @@ def load_pipeline(model):
     return pipeline, threshold
 
 
-def run(request):
+def prepare_pipeline(model, pcm, work):
     import numpy as np
     import torch
+    pipeline, threshold = load_pipeline(model)
+    device = gpu_probe()
+    pipeline.to(torch.device(device["device"]))
+    if device["device"] == "cuda":
+        try:
+            test = torch.from_numpy(np.fromfile(pcm, dtype="<f4", count=RATE * 5)).unsqueeze(0)
+            pipeline({"waveform": test, "sample_rate": RATE})
+            torch.cuda.synchronize()
+        except Exception as exc:
+            pipeline.to(torch.device("cpu"))
+            torch.cuda.empty_cache()
+            device = {"device": "cpu", "message": "Model nie przeszedł próby GPU; CPU: " + str(exc)[:500]}
+    emit(device["message"])
+    atomic_json(work / "diar-device.json", device)
+    return pipeline, threshold, device
 
-    config = request["config"]
-    model, work = Path(config["diar_model"]), Path(request["work"])
-    versions = {name: importlib.metadata.version(name) for name in ("pyannote.audio", "torch", "torchaudio")}
-    base = signature({"pcm": request["pcm_key"], "revision": config["diar_revision"],
-                      "config": digest(model / "config.yaml"), "versions": versions, "version": 1})
-    block_list = list(blocks(request["duration"], config["diar_seconds"], config["diar_context"]))
-    pipeline, device_info, threshold = None, None, None
-    audio = None
+
+def progress_hook(message, index, block_count):
+    def hook(step_name, step_artifact, file=None, total=None, completed=None, **kwargs):
+        fraction = completed / total if total and completed is not None else 0
+        emit(f"{message}: {step_name}", (index + fraction) / block_count * 100)
+    return hook
+
+
+def annotation_turns(annotation, block):
+    return [{"start": block["start"] + float(turn.start),
+             "end": block["start"] + float(turn.end), "speaker": str(label)}
+            for turn, _, label in annotation.itertracks(yield_label=True)]
+
+
+def speaker_embeddings(result):
+    import numpy as np
+    embeddings = {}
+    for index, label in enumerate(result.speaker_diarization.labels()):
+        vector = result.speaker_embeddings[index] if result.speaker_embeddings is not None else None
+        embeddings[str(label)] = vector.tolist() if vector is not None and np.isfinite(vector).all() else None
+    return embeddings
+
+
+class Diarizer:
+    def __init__(self, request):
+        self.request = request
+        self.config = request["config"]
+        self.model, self.work = Path(self.config["diar_model"]), Path(request["work"])
+        self.versions = {name: importlib.metadata.version(name) for name in ("pyannote.audio", "torch", "torchaudio")}
+        self.base = signature({"pcm": request["pcm_key"], "revision": self.config["diar_revision"],
+                               "config": digest(self.model / "config.yaml"), "versions": self.versions, "version": 1})
+        self.pipeline, self.device, self.threshold = None, None, None
+
+    def inference(self, waveform, hook):
+        import torch
+        with torch.inference_mode():
+            try:
+                return self.pipeline({"waveform": waveform, "sample_rate": RATE}, hook=hook)
+            except torch.cuda.OutOfMemoryError:
+                self.pipeline.to(torch.device("cpu"))
+                torch.cuda.empty_cache()
+                self.device = {"device": "cpu", "message": "Za mało pamięci GPU. Dalsza diarizacja na CPU."}
+                emit(self.device["message"])
+                atomic_json(self.work / "diar-device.json", self.device)
+                return self.pipeline({"waveform": waveform, "sample_rate": RATE}, hook=hook)
+
+    def block_result(self, block, key, count):
+        import numpy as np
+        import torch
+        if self.pipeline is None:
+            emit("Ładowanie lokalnego modelu mówców")
+            self.pipeline, self.threshold, self.device = prepare_pipeline(self.model, self.request["pcm"], self.work)
+        started = time.perf_counter()
+        message = f"Mówcy: blok {block['index'] + 1}/{count} ({self.device['device']})"
+        hook = progress_hook(message, block["index"], count)
+        with pcm_samples(self.request["pcm"], block) as audio:
+            samples = np.array(audio, copy=True)
+        waveform = torch.from_numpy(samples).unsqueeze(0)
+        result = self.inference(waveform, hook)
+        return {"signature": key, "block": block, "turns": annotation_turns(result.speaker_diarization, block),
+                "exclusive": annotation_turns(result.exclusive_speaker_diarization, block),
+                "embeddings": speaker_embeddings(result), "threshold": self.threshold,
+                "device": self.device, "versions": self.versions, "seconds": time.perf_counter() - started}
+
+
+def run(request):
+    diarizer = Diarizer(request)
+    config = diarizer.config
+    jobs = list(blocks(request["duration"], config["diar_seconds"], config["diar_context"]))
     output = []
-    try:
-        for block in block_list:
-            key = signature({"base": base, "block": block})
-            path = work / "diar" / f"{block['index']:06}.json"
-            part = valid_checkpoint(path, key)
-            if part is None:
-                if pipeline is None:
-                    emit("Ładowanie lokalnego modelu mówców")
-                    pipeline, threshold = load_pipeline(model)
-                    device_info = gpu_probe()
-                    pipeline.to(torch.device(device_info["device"]))
-                    # Exercise actual model kernels before selecting CUDA for a film.
-                    if device_info["device"] == "cuda":
-                        try:
-                            test = torch.from_numpy(np.fromfile(request["pcm"], dtype="<f4", count=RATE * 5)).unsqueeze(0)
-                            pipeline({"waveform": test, "sample_rate": RATE})
-                            torch.cuda.synchronize()
-                        except Exception as exc:
-                            pipeline.to(torch.device("cpu"))
-                            torch.cuda.empty_cache()
-                            device_info = {"device": "cpu", "message": "Model nie przeszedł próby GPU; CPU: " + str(exc)[:500]}
-                    emit(device_info["message"])
-                    atomic_json(work / "diar-device.json", device_info)
-                start_time = time.perf_counter()
-                message = f"Mówcy: blok {block['index'] + 1}/{len(block_list)} ({device_info['device']})"
-                def hook(step_name, step_artifact, file=None, total=None, completed=None, **kwargs):
-                    fraction = completed / total if total and completed is not None else 0
-                    emit(f"{message}: {step_name}", (block["index"] + fraction) / len(block_list) * 100)
-                # At most 30 minutes + boundary context in RAM, no Python float list.
-                offset = round(block["start"] * RATE)
-                count = round(block["end"] * RATE) - offset
-                audio = np.memmap(request["pcm"], dtype="<f4", mode="r", offset=offset * 4, shape=(count,))
-                samples = np.array(audio, copy=True)
-                audio._mmap.close()
-                audio = None
-                waveform = torch.from_numpy(samples).unsqueeze(0)
-                with torch.inference_mode():
-                    try:
-                        result = pipeline({"waveform": waveform, "sample_rate": RATE}, hook=hook)
-                    except torch.cuda.OutOfMemoryError:
-                        pipeline.to(torch.device("cpu"))
-                        torch.cuda.empty_cache()
-                        device_info = {"device": "cpu", "message": "Za mało pamięci GPU. Dalsza diarizacja na CPU."}
-                        emit(device_info["message"])
-                        atomic_json(work / "diar-device.json", device_info)
-                        result = pipeline({"waveform": waveform, "sample_rate": RATE}, hook=hook)
-                def turns(annotation):
-                    return [{"start": block["start"] + float(turn.start),
-                             "end": block["start"] + float(turn.end), "speaker": str(label)}
-                            for turn, _, label in annotation.itertracks(yield_label=True)]
-                labels = result.speaker_diarization.labels()
-                embeddings = {}
-                for index, label in enumerate(labels):
-                    vector = result.speaker_embeddings[index] if result.speaker_embeddings is not None else None
-                    embeddings[str(label)] = vector.tolist() if vector is not None and np.isfinite(vector).all() else None
-                part = {"signature": key, "block": block, "turns": turns(result.speaker_diarization),
-                        "exclusive": turns(result.exclusive_speaker_diarization), "embeddings": embeddings,
-                        "threshold": threshold, "device": device_info, "versions": versions,
-                        "seconds": time.perf_counter() - start_time}
-                checkpoint(path, part)
-                del result, waveform, samples
-            output.append(part)
-            emit(f"Mówcy: zapisano {block['index'] + 1}/{len(block_list)} bloków", (block["index"] + 1) / len(block_list) * 100)
-    finally:
-        if audio is not None:
-            audio._mmap.close()
-    checkpoint(work / "diar-result.json", {"signature": request["signature"], "blocks": output})
+    for block in jobs:
+        key = signature({"base": diarizer.base, "block": block})
+        path = diarizer.work / "diar" / f"{block['index']:06}.json"
+        part = valid_checkpoint(path, key)
+        if part is None:
+            part = diarizer.block_result(block, key, len(jobs))
+            checkpoint(path, part)
+        output.append(part)
+        emit(f"Mówcy: zapisano {block['index'] + 1}/{len(jobs)} bloków", (block["index"] + 1) / len(jobs) * 100)
+    checkpoint(diarizer.work / "diar-result.json", {"signature": request["signature"], "blocks": output})
 
 
 def main():

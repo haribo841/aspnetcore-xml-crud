@@ -226,9 +226,10 @@ class FilesTests(unittest.TestCase):
         self.assertTrue(verify_outputs(self.root, 'test', 'version'))
         output_paths(self.root)['txt'].write_text('broken')
         self.assertFalse(verify_outputs(self.root, 'test', 'version'))
+        failed_folder, failed_report = self.root / 'failure', self.report()
         with patch('batch.exporter.atomic_new_bytes', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
-                export(self.root / 'failure', self.report(), 'version')
+                export(failed_folder, failed_report, 'version')
         self.assertFalse(verify_outputs(self.root / 'failure', 'test', 'version'))
 
     def test_cleanup_never_deletes_local_source_or_outside(self):

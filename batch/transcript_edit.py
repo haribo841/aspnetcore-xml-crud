@@ -14,7 +14,7 @@ TXT_TIME = re.compile(r"^(?P<time>[ \t]*\[" + TIME + r"(?:[ \t]*-[ \t]*" + TIME 
 SUBTITLE_TIME = re.compile(r"^[ \t]*" + TIME + r"[ \t]+-->[ \t]+" + TIME)
 SPEAKER = re.compile(r"^(?P<indent>[ \t]*(?:-[ \t]*)?)(?:M[oó]wca[ \t]+(?:\d+|nieustalony)|"
                      r"Speaker[ _-]*\d+|Unknown[ \t]+speaker)[ \t]*:[ \t]*", re.IGNORECASE)
-VOICE = re.compile(r"<v(?:\.[^ >\r\n]+)*[ \t]+[^>\r\n]+>", re.IGNORECASE)
+VOICE = re.compile(r"<v(?:\.[^\s.>]+)*+[ \t]++[^>\r\n]++>", re.IGNORECASE)
 VOICE_END = re.compile(r"</v[ \t]*>", re.IGNORECASE)
 
 
@@ -56,48 +56,62 @@ def load_transcript(path):
     return Transcript(path, text, encoding, bom)
 
 
-def remove_speakers(text, extension):
-    extension = extension.lower()
-    if extension not in FORMATS:
-        raise ValueError("Obsługiwane formaty to TXT, SRT i VTT.")
+def speaker_payload(payload, eligible=True):
+    match = SPEAKER.match(payload) if eligible else None
+    if match:
+        return match["indent"] + payload[match.end():], 1
+    return payload, 0
+
+
+def remove_txt_speakers(text):
+    lines, removed, cues = [], 0, 0
+    for line in text.splitlines(keepends=True):
+        match = TXT_TIME.match(line)
+        if match is None:
+            lines.append(line)
+            continue
+        payload, count = speaker_payload(line[match.end():])
+        lines.append(line[:match.end()] + payload)
+        removed += count
+        cues += 1
+    return EditedTranscript("".join(lines), removed, cues)
+
+
+def remove_subtitle_speakers(text, extension):
     lines, removed, cues = [], 0, 0
     in_cue = False
     first_payload = False
     for line in text.splitlines(keepends=True):
-        prefix, payload = "", line
-        if extension == ".txt":
-            match = TXT_TIME.match(line)
-            if not match:
-                lines.append(line)
-                continue
+        if not line.strip():
+            in_cue = False
+        if SUBTITLE_TIME.match(line):
             cues += 1
-            prefix, payload = line[:match.end()], line[match.end():]
-        else:
-            if not line.strip():
-                in_cue = False
-            if SUBTITLE_TIME.match(line):
-                cues += 1
-                in_cue = True
-                first_payload = True
-                lines.append(line)
-                continue
-            if not in_cue:
-                lines.append(line)
-                continue
-        match = SPEAKER.match(payload) if extension == ".txt" or first_payload or payload.lstrip(" \t").startswith("-") else None
+            in_cue = True
+            first_payload = True
+            lines.append(line)
+            continue
+        if not in_cue:
+            lines.append(line)
+            continue
+        payload, count = speaker_payload(line, first_payload or line.lstrip(" \t").startswith("-"))
         first_payload = False
-        if match:
-            # Remove one leading annotation, never names mentioned in speech.
-            payload = match["indent"] + payload[match.end():]
-            removed += 1
+        removed += count
         if extension == ".vtt":
             payload, count = VOICE.subn("", payload)
-            if count:
-                removed += count
+            removed += count
             # A voice span can close on a later line within the same cue.
             payload = VOICE_END.sub("", payload)
-        lines.append(prefix + payload)
+        lines.append(payload)
     return EditedTranscript("".join(lines), removed, cues)
+
+
+def remove_speakers(text, extension):
+    extension = extension.lower()
+    if extension not in FORMATS:
+        raise ValueError("Obsługiwane formaty to TXT, SRT i VTT.")
+    if extension == ".txt":
+        return remove_txt_speakers(text)
+    return remove_subtitle_speakers(text, extension)
 
 
 def save_without_speakers(source, output_dir=None):

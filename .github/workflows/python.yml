@@ -22,9 +22,11 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
-          cache-dependency-path: requirements-batch.lock.txt
+          cache-dependency-path: |
+            requirements-batch.lock.txt
+            requirements-test.lock.txt
       - name: Install locked application dependencies
-        run: python -m pip install -r requirements-batch.lock.txt
+        run: python -m pip install -r requirements-batch.lock.txt -r requirements-test.lock.txt
       - name: Check dependency consistency
         run: python -m pip check
       - name: Compile sources

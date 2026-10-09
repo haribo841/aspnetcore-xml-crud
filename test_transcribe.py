@@ -69,15 +69,16 @@ class TranscriptionTests(unittest.TestCase):
             source.write_bytes(b"not an audio file")
             with self.assertRaisesRegex(RuntimeError, "FFmpeg"):
                 with decoded_audio(source, ffmpeg, directory):
-                    self.fail("Invalid input was accepted")
+                    pass
             self.assertEqual(list(Path(directory).iterdir()), [source])
 
     def test_unavailable_device_does_not_silently_fall_back(self):
         class Core:
             available_devices = ["CPU", "GPU.0"]
-        self.assertEqual(checked_device(Core(), "GPU"), "GPU.0")
+        core = Core()
+        self.assertEqual(checked_device(core, "GPU"), "GPU.0")
         with self.assertRaisesRegex(ValueError, "NPU"):
-            checked_device(Core(), "NPU")
+            checked_device(core, "NPU")
 
 
 if __name__ == "__main__":

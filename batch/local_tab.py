@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 from .common import atomic_json, read_json
 from .importers import MEDIA, import_local
 from .store import RETRYABLE, STATUSES
-from .ui_help import HELP, Tooltip, help_button, wrap_with_parent
+from .ui_help import HELP, Tooltip, help_button, status_tags, sync_tree, wrap_with_parent
 
 
 def folder_media(folder, recursive=True, m4a_only=False):
@@ -214,32 +214,17 @@ class LocalQueueTab:
 
     def render(self):
         rows = [job for job in self.app.jobs.values() if job["kind"] == "local"]
-        selected = set(self.tree.selection())
-        wanted = []
+        visible_rows = []
         for job in rows:
             if self.search.get().casefold() not in (job["title"] + " " + job["source"]).casefold():
                 continue
             if self.status.get() != "Wszystkie" and STATUSES[job["status"]] != self.status.get():
                 continue
             item = str(job["id"])
-            wanted.append(item)
             values = ("Tak" if job["enabled"] else "", STATUSES[job["status"]], job["stage"],
                       f"{job['progress']:.0f}", job["title"], job["language"], job["audio_track"] + 1)
-            if self.visible.get(item) != values:
-                tags = ("done",) if job["status"] == "done" else ("error",) if job["status"] in RETRYABLE else ()
-                if self.tree.exists(item):
-                    self.tree.item(item, values=values, tags=tags)
-                else:
-                    self.tree.insert("", "end", iid=item, values=values, tags=tags)
-                self.visible[item] = values
-        for item in list(self.visible):
-            if item not in wanted:
-                self.tree.delete(item)
-                del self.visible[item]
-        if list(self.tree.get_children()) != wanted:
-            for index, item in enumerate(wanted):
-                self.tree.move(item, "", index)
-        self.tree.selection_set(list(selected & set(wanted)))
+            visible_rows.append((item, values, status_tags(job["status"])))
+        sync_tree(self.tree, self.visible, visible_rows)
         self.show_detail()
         counts = Counter(job["status"] for job in rows)
         pending = sum(job["status"] == "pending" and job["enabled"] for job in rows)
@@ -249,6 +234,11 @@ class LocalQueueTab:
         self.render()
         job = self.app.jobs.get(control["current_id"])
         scope = job["kind"] if job else control.get("scope_kind", "all")
+        self.show_current(control, alive, job, scope)
+        self.controls["start"].state(["disabled"] if alive or self.app.busy_import else ["!disabled"])
+        self.controls["stop"].state(["!disabled"] if alive and scope == "local" else ["disabled"])
+
+    def show_current(self, control, alive, job, scope):
         if alive and scope == "local":
             suffix = " | Zatrzymam się po tym nagraniu." if control["stop"] else ""
             self.current.set((f"{job['title']} | {job['stage']}" if job else "Przygotowanie lokalnej sesji...") + suffix)
@@ -260,8 +250,6 @@ class LocalQueueTab:
             message = control["message"][:500] if scope == "local" else ""
             self.current.set("Kolejka lokalna zatrzymana. " + message)
             self.progress["value"] = 0
-        self.controls["start"].state(["disabled"] if alive or self.app.busy_import else ["!disabled"])
-        self.controls["stop"].state(["!disabled"] if alive and scope == "local" else ["disabled"])
 
     def show_detail(self, event=None):
         ids = self.selected()

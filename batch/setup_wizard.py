@@ -17,6 +17,9 @@ from .hf_access import MODEL_ID, MODEL_URL, TOKENS_URL, check_access, redact
 from .ui_help import Tooltip, help_button, wrap_with_parent
 
 
+DOWNLOAD_LABEL = 'Pobierz model'
+
+
 class SetupWizard:
     def __init__(self, app):
         self.app = app
@@ -162,7 +165,7 @@ class SetupWizard:
         self.progress = ttk.Progressbar(page, mode="indeterminate", maximum=100)
         self.progress.pack(fill="x", pady=(0, 14))
         Tooltip(self.progress, "Pokazuje postęp pobierania lub pracy próbnej. Gdy nie da się określić czasu, pasek sygnalizuje trwającą pracę.", self.help_status)
-        self.download_button = self.button(page, "Pobierz model", self.download,
+        self.download_button = self.button(page, DOWNLOAD_LABEL, self.download,
                     "Pobiera Community-1. Następnie wybierz własne nagranie do krótkiej próby. Wymaga poprawnego dostępu z kroku 2.", state="disabled")
         self.download_button.pack(anchor="w", pady=(0, 10))
         self.results_button = self.button(page, "Otwórz wyniki próby", self.open_test_results,
@@ -208,7 +211,7 @@ class SetupWizard:
         if self.local_ready:
             self.app.test_local()
             return
-        if not self.local_ready and self.verified != self.fingerprint():
+        if self.verified != self.fingerprint():
             self.tabs.select(1)
             self.access_message.set("Najpierw sprawdź dostęp dla wpisanego tokenu.")
             return
@@ -222,9 +225,7 @@ class SetupWizard:
         self.progress_message.set("Uruchamianie konfiguracji. Możesz pozostawić to okno otwarte.")
         self.progress.start(12)
 
-    def poll(self):
-        if self.closed:
-            return
+    def consume_access(self):
         while not self.events.empty():
             fingerprint, result = self.events.get_nowait()
             self.checking = False
@@ -239,6 +240,54 @@ class SetupWizard:
                 account = result.get("account", "")
                 self.progress_message.set((f"Konto: {account}. " if account else "") + result["message"])
                 self.tabs.select(2)
+
+    def show_running(self, percent):
+        self.download_button.configure(state="disabled")
+        if percent is None:
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(12)
+        else:
+            self.progress.stop()
+            self.progress.configure(mode="determinate", value=percent)
+
+    def show_ready(self, state):
+        self.local_ready = True
+        self.progress.configure(mode="determinate", value=100)
+        self.download_button.configure(text="Uruchom krótką próbę", state="normal")
+        results_path = state.get("test_results")
+        has_results = bool(results_path and Path(results_path).is_dir())
+        self.results_button.configure(state="normal" if has_results else "disabled")
+
+    def show_interrupted(self, state):
+        try:
+            validate_diarization(self.app.config)
+            self.local_ready = True
+        except Exception:
+            self.local_ready = False
+        self.download_button.configure(text="Ponów krótką próbę" if self.local_ready else DOWNLOAD_LABEL,
+                                       state="normal" if self.local_ready else "disabled")
+        if state.get("state") == "running":
+            self.progress_message.set("Poprzednie pobieranie lub próba zostały przerwane. Wróć do kroku 2 albo uruchom próbę, jeśli model jest już pobrany.")
+        elif not self.local_ready:
+            self.progress_message.set(redact(state.get("message", "")) + "\nWróć do kroku 2, aby sprawdzić dostęp ponownie.")
+
+    def show_state(self, state, busy):
+        self.last_state, self.last_busy = state, busy
+        self.progress_message.set(redact(state.get("message", "")))
+        phase = state.get("state")
+        if phase == "running" and busy:
+            self.show_running(state.get("percent"))
+            return
+        self.progress.stop()
+        if phase == "ready":
+            self.show_ready(state)
+        elif phase in {"error", "running"}:
+            self.show_interrupted(state)
+
+    def poll(self):
+        if self.closed:
+            return
+        self.consume_access()
         state = read_json(self.app.root / "konfiguracja-modelu.json", {})
         busy = WorkerLock.busy(self.app.root / "konfiguracja")
         state_changed = state != self.last_state or busy != self.last_busy
@@ -247,47 +296,7 @@ class SetupWizard:
         launching = (state.get("state") == "running" and not busy and self.last_busy is not True
                      and time.monotonic() - (self.started or self.opened) < 4)
         if state and state_changed and not launching:
-            self.last_state = state
-            self.last_busy = busy
-            self.progress_message.set(redact(state.get("message", "")))
-            phase = state.get("state")
-            if phase == "running" and busy:
-                self.download_button.configure(state="disabled")
-                percent = state.get("percent")
-                if percent is None:
-                    self.progress.configure(mode="indeterminate")
-                    self.progress.start(12)
-                else:
-                    self.progress.stop()
-                    self.progress.configure(mode="determinate", value=percent)
-            else:
-                self.progress.stop()
-                if phase == "ready":
-                    self.local_ready = True
-                    self.progress.configure(mode="determinate", value=100)
-                    self.download_button.configure(text="Uruchom krótką próbę", state="normal")
-                    results_path = state.get("test_results")
-                    has_results = bool(results_path and Path(results_path).is_dir())
-                    self.results_button.configure(state="normal" if has_results else "disabled")
-                elif phase == "error":
-                    try:
-                        validate_diarization(self.app.config)
-                        self.local_ready = True
-                    except Exception:
-                        self.local_ready = False
-                    self.download_button.configure(text="Ponów krótką próbę" if self.local_ready else "Pobierz model",
-                                                   state="normal" if self.local_ready else "disabled")
-                    if not self.local_ready:
-                        self.progress_message.set(redact(state.get("message", "")) + "\nWróć do kroku 2, aby sprawdzić dostęp ponownie.")
-                elif phase == "running" and not busy:
-                    try:
-                        validate_diarization(self.app.config)
-                        self.local_ready = True
-                    except Exception:
-                        self.local_ready = False
-                    self.download_button.configure(text="Ponów krótką próbę" if self.local_ready else "Pobierz model",
-                                                   state="normal" if self.local_ready else "disabled")
-                    self.progress_message.set("Poprzednie pobieranie lub próba zostały przerwane. Wróć do kroku 2 albo uruchom próbę, jeśli model jest już pobrany.")
+            self.show_state(state, busy)
         self.after_id = self.dialog.after(400, self.poll)
 
     def open_test_results(self):

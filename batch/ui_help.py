@@ -5,6 +5,38 @@ import tkinter as tk
 from tkinter import ttk
 
 
+def status_tags(status):
+    from .store import RETRYABLE
+    if status in {"done", "draft"}:
+        return (status,)
+    if status in RETRYABLE:
+        return ("error",)
+    return ()
+
+
+def sync_tree(tree, visible, rows):
+    """Refresh rows while retaining the selection and avoiding repeated inserts."""
+    selected = set(tree.selection())
+    wanted = []
+    for item, values, tags in rows:
+        wanted.append(item)
+        if visible.get(item) != values:
+            if tree.exists(item):
+                tree.item(item, values=values, tags=tags)
+            else:
+                tree.insert("", "end", iid=item, values=values, tags=tags)
+            visible[item] = values
+    wanted_set = set(wanted)
+    for item in list(visible):
+        if item not in wanted_set:
+            tree.delete(item)
+            del visible[item]
+    if tree.get_children() != tuple(wanted):
+        for index, item in enumerate(wanted):
+            tree.move(item, "", index)
+    tree.selection_set(*sorted(selected & wanted_set))
+
+
 class Tooltip:
     def __init__(self, widget, text, status=None, delay=450):
         self.widget, self.text, self.status, self.delay = widget, text, status, delay
@@ -28,8 +60,10 @@ class Tooltip:
 
     def show(self, event=None):
         self.cancel()
-        if self.popup or not self.widget.winfo_exists() or not self.widget.winfo_viewable():
+        if self.popup:
             return "break"
+        if not self.widget.winfo_exists() or not self.widget.winfo_viewable():
+            return None
         popup = self.popup = tk.Toplevel(self.widget)
         popup.withdraw()
         popup.wm_overrideredirect(True)

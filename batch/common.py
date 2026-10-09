@@ -13,18 +13,21 @@ import sys
 import tempfile
 import time
 
+from .paths import child_path, input_file, local_path, output_file, within_root
+
 APP = Path(__file__).resolve().parent.parent
 DEFAULT_ROOT = Path(os.environ.get("KOLEJKA_ROOT", str(Path.home() / "Transkrypcje")))
 RATE = 16000
 MODEL_REVISION = "0250c28d68c7c10d6b5cb39707e876c0c66ab6f8"
 DIAR_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+CONSOLE_PYTHON = "python.exe"
 
 
 def application_python():
     """Use this application's interpreter, including when launched by pythonw."""
     interpreter = Path(sys.executable)
-    console = interpreter.with_name("python.exe")
+    console = interpreter.with_name(CONSOLE_PYTHON)
     if os.name == "nt" and interpreter.stem.lower() == "pythonw" and console.is_file():
         return str(console)
     return str(interpreter)
@@ -43,7 +46,7 @@ def defaults():
         "model_revision": MODEL_REVISION,
         "diar_model": str(DEFAULT_ROOT / "modele" / "community-1"),
         "diar_revision": DIAR_REVISION,
-        "diar_python": str(APP / ".venv-diarization" / "Scripts" / "python.exe"),
+        "diar_python": str(APP / ".venv-diarization" / "Scripts" / CONSOLE_PYTHON),
         "ffmpeg": external_tool("ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe"),
         "ffprobe": external_tool("ffprobe", r"C:\ffmpeg\bin\ffprobe.exe"),
         "node": external_tool("node", r"C:\Program Files\nodejs\node.exe"),
@@ -53,7 +56,7 @@ def defaults():
         "language": "auto", "audio_track": 0,
         "device": "CPU", "hotwords": "",
         "uvr_enabled": False, "keep_audio": False,
-        "uvr_python": str(APP / ".venv-uvr" / "Scripts" / "python.exe"),
+        "uvr_python": str(APP / ".venv-uvr" / "Scripts" / CONSOLE_PYTHON),
         "uvr_model_dir": str(DEFAULT_ROOT / "modele" / "uvr"),
         "uvr_model": "UVR-MDX-NET-Voc_FT.onnx", "uvr_seconds": 300, "uvr_context": 3,
     }
@@ -61,20 +64,28 @@ def defaults():
 
 def read_json(path, fallback=None):
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        path = local_path(path)
+        if path.suffix.casefold() != ".json":
+            raise ValueError("Oczekiwano lokalnego pliku JSON.")
+        return json.loads(input_file(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return fallback
 
 
 def atomic_bytes(path, data):
-    path = Path(path)
+    path = output_file(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".zapis-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def atomic_json(path, value):
@@ -84,7 +95,7 @@ def atomic_json(path, value):
 
 def atomic_new_bytes(path, data):
     """Publish a complete new file without replacing an existing destination."""
-    path = Path(path)
+    path = output_file(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -103,7 +114,7 @@ def atomic_new_bytes(path, data):
 
 
 def digest(path):
-    with Path(path).open("rb") as stream:
+    with input_file(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
@@ -113,7 +124,7 @@ def signature(value):
 
 
 def settings(root):
-    root = Path(root)
+    root = local_path(root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / "ustawienia.json"
     config = defaults()
@@ -132,13 +143,11 @@ def slug(text, limit=65):
 
 def job_folder(root, job):
     # The path is persisted at first import, so title changes cannot orphan work.
-    return Path(root) / "wyniki" / job["folder"]
+    return child_path(Path(root) / "wyniki", job["folder"])
 
 
 def remove_work_file(path, work):
-    path, work = Path(path).resolve(), Path(work).resolve()
-    if not path.is_relative_to(work) or path == work:
-        raise ValueError("Odmowa usunięcia pliku poza katalogiem roboczym.")
+    path = within_root(path, work)
     if path.is_file():
         path.unlink()
 

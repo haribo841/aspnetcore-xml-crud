@@ -18,16 +18,21 @@ from .media import audio_tracks
 from .result_paths import output_paths
 from .store import RETRYABLE, STATUSES, Store
 from .transcript_tab import TranscriptTab
-from .ui_help import HELP, Tooltip, help_button, wrap_with_parent
+from .ui_help import HELP, Tooltip, help_button, status_tags, sync_tree, wrap_with_parent
 from .worker import launch, preflight
 from .youtube_access import SessionError, error_message, preferences as youtube_preferences
+
+
+MODEL_STATE_FILE = 'konfiguracja-modelu.json'
+AUDIO_TRACK_TITLE = 'Ścieżka audio'
+FONT_FAMILY = 'Segoe UI'
 
 
 class Window:
     def __init__(self, root, tk_root=None):
         self.root = Path(root)
         self.store, self.config = Store(root), settings(root)
-        self.window = tk_root or tk.Tk()
+        self.tk_root = tk_root or tk.Tk()
         self.window.title("Kolejka transkrypcji")
         self.window.geometry("1360x860")
         self.window.minsize(1220, 760)
@@ -175,14 +180,22 @@ class Window:
                                    foreground="#344963", justify="left")
         self.help_label.pack(fill="both", expand=True)
         help_frame.bind("<Configure>", lambda event: self.help_label.configure(wraplength=max(300, event.width - 25)))
-        for widget in outer.winfo_children():
-            if isinstance(widget, ttk.Label) and int(widget.cget("wraplength") or 0):
-                wrap_with_parent(widget, 24)
+        self.wrap_labels(outer)
         self.local_tab = LocalQueueTab(self, self.local_page)
         self.transcript_tab = TranscriptTab(self, self.processing_page)
         self.notebook.bind("<<NotebookTabChanged>>", self.queue_changed)
         self.refresh()
         self.events_after = self.window.after(250, self.consume_events)
+
+    @property
+    def window(self):
+        """Retain the existing embedding API while naming the Tk field explicitly."""
+        return self.tk_root
+
+    def wrap_labels(self, outer):
+        for widget in outer.winfo_children():
+            if isinstance(widget, ttk.Label) and int(widget.cget("wraplength") or 0):
+                wrap_with_parent(widget, 24)
 
     def add_help(self, widget, key):
         self.controls[key] = widget
@@ -241,45 +254,31 @@ class Window:
     def type_of(self, job):
         return "Lokalne" if job["kind"] == "local" else json.loads(job["source_meta"]).get("kind", "YouTube")
 
+    def matches_youtube_view(self, job):
+        if job["kind"] != "youtube":
+            return False
+        if self.search.get().casefold() not in (job["title"] + " " + job["identity"]).casefold():
+            return False
+        if self.status.get() != "Wszystkie" and STATUSES[job["status"]] != self.status.get():
+            return False
+        kind = self.kind.get()
+        if kind not in {"Wszystkie", "YouTube"} and self.type_of(job) != kind:
+            return False
+        day = job["date"][:10]
+        return not ((self.date_from.get() and day < self.date_from.get()) or
+                    (self.date_to.get() and day > self.date_to.get()))
+
     def render_list(self):
-        selected = set(self.tree.selection())
-        wanted = []
+        visible_rows = []
         for job in self.jobs.values():
-            if job["kind"] != "youtube":
-                continue
-            if self.search.get().casefold() not in (job["title"] + " " + job["identity"]).casefold():
-                continue
-            if self.status.get() != "Wszystkie" and STATUSES[job["status"]] != self.status.get():
-                continue
-            kind = self.kind.get()
-            if kind == "YouTube" and job["kind"] != "youtube":
-                continue
-            if kind not in {"Wszystkie", "YouTube"} and self.type_of(job) != kind:
+            if not self.matches_youtube_view(job):
                 continue
             day = job["date"][:10]
-            if (self.date_from.get() and day < self.date_from.get()) or (self.date_to.get() and day > self.date_to.get()):
-                continue
             item = str(job["id"])
-            wanted.append(item)
             values = ("Tak" if job["enabled"] else "", day, self.type_of(job), STATUSES[job["status"]],
                       f"{job['progress']:.0f}", job["title"], job["language"], job["audio_track"] + 1)
-            if self.visible.get(item) != values:
-                tag = "done" if job["status"] == "done" else "draft" if job["status"] == "draft" else "error" if job["status"] in RETRYABLE else ""
-                if self.tree.exists(item):
-                    self.tree.item(item, values=values, tags=(tag,))
-                else:
-                    self.tree.insert("", "end", iid=item, values=values, tags=(tag,))
-                self.visible[item] = values
-        wanted_set = set(wanted)
-        for item in list(self.visible):
-            if item not in wanted_set:
-                self.tree.delete(item)
-                del self.visible[item]
-        actual = self.tree.get_children()
-        if list(actual) != wanted:
-            for index, item in enumerate(wanted):
-                self.tree.move(item, "", index)
-        self.tree.selection_set(list(selected & wanted_set))
+            visible_rows.append((item, values, status_tags(job["status"])))
+        sync_tree(self.tree, self.visible, visible_rows)
 
     def refresh(self):
         rows = self.store.jobs()
@@ -292,6 +291,23 @@ class Window:
         job = self.jobs.get(control["current_id"])
         alive = WorkerLock.busy(self.root)
         scope = job["kind"] if job else control.get("scope_kind", "all")
+        self.show_current(control, alive, job, scope)
+        self.refresh_models()
+        self.render_list()
+        self.local_tab.refresh(control, alive)
+        self.controls["start"].state(["disabled"] if alive or self.busy_import else ["!disabled"])
+        self.controls["stop"].state(["!disabled"] if alive and scope != "local" else ["disabled"])
+        self.refresh_after = self.window.after(1200, self.refresh)
+
+    def idle_title(self, alive):
+        checking = self.youtube_dialog and self.youtube_dialog.checking and not self.youtube_dialog.closed
+        if checking:
+            return "Trwa test dostępu YouTube. "
+        if alive:
+            return "Przygotowanie pracy..."
+        return "Kolejka zatrzymana. "
+
+    def show_current(self, control, alive, job, scope):
         if alive and scope == "local":
             self.current.set("Trwa kolejka lokalna. Jej postęp i zatrzymanie są dostępne w karcie Kolejka lokalna.")
             self.progress["value"] = 0
@@ -303,16 +319,17 @@ class Window:
             message = control["message"] if scope != "local" else ""
             if "not a bot" in message.casefold() or "too many requests" in message.casefold():
                 message = error_message(message)
-            checking = self.youtube_dialog and self.youtube_dialog.checking and not self.youtube_dialog.closed
-            self.current.set(("Trwa test dostępu YouTube. " if checking else "Przygotowanie pracy..." if alive else "Kolejka zatrzymana. ") + message[:500])
+            self.current.set(self.idle_title(alive) + message[:500])
             self.progress["value"] = 0
+
+    def refresh_models(self):
         try:
             access = youtube_preferences(self.root)
             mode = {"anonymous": "anonimowo", "browser": "sesja " + access["browser"], "file": "plik cookies"}[access["mode"]]
             self.youtube_state.set(f"YouTube: {mode} | przerwa przed filmem: {access['delay_seconds']:g} s | przy blokadzie otwórz Dostęp YouTube")
         except (SessionError, OSError):
             self.youtube_state.set("Sprawdź ustawienia w Dostęp YouTube.")
-        state = read_json(self.root / "konfiguracja-modelu.json", {})
+        state = read_json(self.root / MODEL_STATE_FILE, {})
         try:
             validate_diarization(self.config)
             message = "Model mówców pobrany. "
@@ -322,11 +339,6 @@ class Window:
         uvr_state = read_json(self.root / "konfiguracja-uvr.json", {})
         if uvr_state:
             self.model_state.set(self.model_state.get() + " | UVR: " + uvr_state.get("message", "")[:180])
-        self.render_list()
-        self.local_tab.refresh(control, alive)
-        self.controls["start"].state(["disabled"] if alive or self.busy_import else ["!disabled"])
-        self.controls["stop"].state(["!disabled"] if alive and scope != "local" else ["disabled"])
-        self.refresh_after = self.window.after(1200, self.refresh)
 
     def show_detail(self, event=None):
         selected = [int(item) for item in self.tree.selection()]
@@ -409,49 +421,27 @@ class Window:
     def audio_track(self, ids=None):
         ids = self.selected() if ids is None else ids
         if len(ids) != 1:
-            messagebox.showinfo("Ścieżka audio", "Zaznacz jeden plik lokalny.", parent=self.window)
+            messagebox.showinfo(AUDIO_TRACK_TITLE, "Zaznacz jeden plik lokalny.", parent=self.window)
             return
         job = self.jobs[ids[0]]
         if job["kind"] != "local":
-            messagebox.showinfo("Ścieżka audio", "Dla YouTube pobierany jest najlepszy dostępny strumień audio.", parent=self.window)
+            messagebox.showinfo(AUDIO_TRACK_TITLE, "Dla YouTube pobierany jest najlepszy dostępny strumień audio.", parent=self.window)
             return
         try:
             tracks = audio_tracks(job["source"], self.config)
             descriptions = [f"{index + 1}: {s.get('codec_name')} | {s.get('channels')} kanałów | {s.get('tags', {}).get('language', '')} {s.get('tags', {}).get('title', '')}" for index, s in enumerate(tracks)]
-            value = simpledialog.askinteger("Ścieżka audio", "\n".join(descriptions) + "\n\nNumer ścieżki:", minvalue=1, maxvalue=len(tracks), initialvalue=job["audio_track"] + 1, parent=self.window)
+            value = simpledialog.askinteger(AUDIO_TRACK_TITLE, "\n".join(descriptions) + "\n\nNumer ścieżki:", minvalue=1, maxvalue=len(tracks), initialvalue=job["audio_track"] + 1, parent=self.window)
             if value:
                 self.store.configure(ids, audio_track=value - 1)
         except Exception as exc:
-            messagebox.showerror("Ścieżka audio", str(exc), parent=self.window)
+            messagebox.showerror(AUDIO_TRACK_TITLE, str(exc), parent=self.window)
 
     def start(self, kind="youtube", job_ids=None):
-        if self.busy_import:
-            messagebox.showinfo("Trwa import", "Poczekaj na zakończenie importu przed uruchomieniem kolejki.", parent=self.window)
-            return
-        if WorkerLock.busy(self.root):
-            messagebox.showinfo("Trwa sesja", "Najpierw dokończ bieżące nagranie i zatrzymaj trwającą kolejkę. Start nie zmienia zakresu aktywnej sesji.", parent=self.window)
-            return
-        if self.youtube_dialog and self.youtube_dialog.running:
-            if not self.youtube_dialog.closed:
-                self.youtube_dialog.dialog.lift()
-            self.help_status.set("Poczekaj na zakończenie lub anulowanie testu YouTube, a następnie naciśnij Start/Wznów.")
+        if self.start_in_progress():
             return
         try:
-            self.config = settings(self.root)
-            if self.config["diarization"]:
-                try:
-                    validate_diarization(self.config)
-                except Exception:
-                    self.configure_model()
-                    return
-            preflight(self.config, self.root, kind=kind)
-            if self.config["diarization"]:
-                test = read_json(self.root / "pierwsza-proba.json", {})
-                if not test.get("passed") or test.get("whisper_revision") != self.config["model_revision"] or test.get("diar_revision") != self.config["diar_revision"]:
-                    self.configure_model()
-                    self.setup_dialog.tabs.select(2)
-                    self.setup_dialog.progress_message.set("Przed pierwszym Start wykonaj krótką próbę przyciskiem poniżej. Kolejka filmów pozostanie zatrzymana.")
-                    return
+            if not self.ready_to_start(kind):
+                return
             if kind == "youtube" and self.selected_only.get():
                 job_ids = [int(item) for item in self.tree.selection()]
                 if not job_ids:
@@ -467,6 +457,39 @@ class Window:
             launch(self.root, kind=kind, job_ids=job_ids)
         except Exception as exc:
             messagebox.showerror("Kolejka nie została uruchomiona", str(exc), parent=self.window)
+
+    def start_in_progress(self):
+        if self.busy_import:
+            messagebox.showinfo("Trwa import", "Poczekaj na zakończenie importu przed uruchomieniem kolejki.", parent=self.window)
+            return True
+        if WorkerLock.busy(self.root):
+            messagebox.showinfo("Trwa sesja", "Najpierw dokończ bieżące nagranie i zatrzymaj trwającą kolejkę. Start nie zmienia zakresu aktywnej sesji.", parent=self.window)
+            return True
+        if self.youtube_dialog and self.youtube_dialog.running:
+            if not self.youtube_dialog.closed:
+                self.youtube_dialog.dialog.lift()
+            self.help_status.set("Poczekaj na zakończenie lub anulowanie testu YouTube, a następnie naciśnij Start/Wznów.")
+            return True
+        return False
+
+    def ready_to_start(self, kind):
+        self.config = settings(self.root)
+        if self.config["diarization"]:
+            try:
+                validate_diarization(self.config)
+            except Exception:
+                self.configure_model()
+                return False
+        preflight(self.config, self.root, kind=kind)
+        if not self.config["diarization"]:
+            return True
+        test = read_json(self.root / "pierwsza-proba.json", {})
+        if test.get("passed") and test.get("whisper_revision") == self.config["model_revision"] and test.get("diar_revision") == self.config["diar_revision"]:
+            return True
+        self.configure_model()
+        self.setup_dialog.tabs.select(2)
+        self.setup_dialog.progress_message.set("Przed pierwszym Start wykonaj krótką próbę przyciskiem poniżej. Kolejka filmów pozostanie zatrzymana.")
+        return False
 
     def stop(self, kind="youtube"):
         control = self.store.control()
@@ -514,7 +537,7 @@ class Window:
             messagebox.showinfo("Konfiguracja", "Pobieranie lub próba już trwa.", parent=self.window)
             return False
         try:
-            atomic_json(self.root / "konfiguracja-modelu.json", {"state": "running", "phase": "starting",
+            atomic_json(self.root / MODEL_STATE_FILE, {"state": "running", "phase": "starting",
                         "message": "Uruchamianie konfiguracji. Możesz pozostawić to okno otwarte."})
             with (self.root / "konfiguracja.log").open("ab") as log:
                 process = subprocess.Popen([application_python(), "-m", "batch.setup_model", str(self.root)],
@@ -526,7 +549,7 @@ class Window:
         except (OSError, ValueError):
             # Never include request contents, command-line tokens or HTTP traces.
             message = "Nie udało się uruchomić konfiguracji. Sprawdź dostęp do folderu wyników i środowisko Python aplikacji, a potem spróbuj ponownie."
-            atomic_json(self.root / "konfiguracja-modelu.json", {"state": "error", "message": message})
+            atomic_json(self.root / MODEL_STATE_FILE, {"state": "error", "message": message})
             messagebox.showerror("Konfiguracja", message, parent=self.window)
             return False
         self.model_state.set("Uruchamianie konfiguracji...")
@@ -565,10 +588,9 @@ class Window:
             self.configure_model()
             return
         path = filedialog.askopenfilename(title="Krótka próba (do 2 minut)", parent=self.window)
-        if path:
-            if self.setup_process({"test_only": True, "source": path}):
-                self.configure_model()
-                self.setup_dialog.tabs.select(2)
+        if path and self.setup_process({"test_only": True, "source": path}):
+            self.configure_model()
+            self.setup_dialog.tabs.select(2)
 
     def configure_model(self):
         from .setup_wizard import SetupWizard
@@ -598,17 +620,17 @@ class Window:
         dialog.transient(self.window)
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill="both", expand=True)
-        heading = ttk.Label(frame, text="Pierwsza sesja: modele → krótka próba → wybór nagrań → Start", font=("Segoe UI", 12, "bold"), wraplength=770)
+        heading = ttk.Label(frame, text="Pierwsza sesja: modele → krótka próba → wybór nagrań → Start", font=(FONT_FAMILY, 12, "bold"), wraplength=770)
         heading.pack(anchor="w", pady=(0, 10))
         wrap_with_parent(heading, 32)
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
-        content = tk.Text(body, wrap="word", padx=12, pady=10, font=("Segoe UI", 10))
+        content = tk.Text(body, wrap="word", padx=12, pady=10, font=(FONT_FAMILY, 10))
         scrollbar = ttk.Scrollbar(body, orient="vertical", command=content.yview)
         content.configure(yscrollcommand=scrollbar.set)
         content.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        content.tag_configure("heading", font=("Segoe UI", 11, "bold"), spacing1=12, spacing3=4)
+        content.tag_configure("heading", font=(FONT_FAMILY, 11, "bold"), spacing1=12, spacing3=4)
         for heading, keys in (("Przygotowanie", ("speakers", "test", "youtube_access", "import", "files", "folder")),
                               ("Wybór i ustawienia nagrań", ("search", "select", "enable", "disable", "language", "track", "uvr", "keep", "uvr_model")),
                               ("Praca i wyniki", ("start", "selected_only", "stop", "retry", "results", "transcript", "csv"))):

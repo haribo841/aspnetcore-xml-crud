@@ -25,6 +25,17 @@ from .uvr import archive_source, separate, validate_uvr
 from .youtube_access import preferences as youtube_preferences
 
 
+def resolve_tools(config, kind):
+    names = ("ffmpeg", "ffprobe") if kind == "local" else ("ffmpeg", "ffprobe", "node")
+    for name in names:
+        candidate = str(config[name])
+        if not Path(candidate).is_file() and Path(candidate).name == candidate:
+            candidate = shutil.which(candidate) or candidate
+        if not Path(candidate).is_file():
+            raise ResourceError(f"Brak programu {name}: {config[name]}")
+        config[name] = candidate
+
+
 def preflight(config, root, kind="all"):
     kind = scope_kind(kind)
     from transcribe import validate_model
@@ -32,15 +43,7 @@ def preflight(config, root, kind="all"):
         validate_model(Path(config["model"]))
     except Exception as exc:
         raise ResourceError("Model Whisper nie jest gotowy: " + str(exc)) from exc
-    for name in (("ffmpeg", "ffprobe") if kind == "local" else ("ffmpeg", "ffprobe", "node")):
-        candidate = str(config[name])
-        if not Path(candidate).is_file() and Path(candidate).name == candidate:
-            resolved = shutil.which(candidate)
-            if resolved:
-                candidate = resolved
-        if not Path(candidate).is_file():
-            raise ResourceError(f"Brak programu {name}: {config[name]}")
-        config[name] = candidate
+    resolve_tools(config, kind)
     if config["diarization"]:
         validate_diarization(config)
     if config.get("uvr_enabled"):
@@ -147,18 +150,66 @@ class Worker:
             # Outputs are valid. Keep evidence of cleanup failure, retry next start.
             self.store.update(job["id"], error="Wyniki gotowe; sprzątanie wymaga ponowienia: " + str(exc))
 
-    def run(self, check=True, max_jobs=None, *, _held_lock=None):
-        lock = _held_lock or WorkerLock(self.root)
-        if _held_lock is None:
-            if not lock.acquire():
-                return False
-        elif lock.stream is None or lock.path.resolve() != (self.root / "worker.lock").resolve():
+    def execution_lock(self, held_lock):
+        lock = held_lock or WorkerLock(self.root)
+        if held_lock is None and not lock.acquire():
+            return None
+        if held_lock is not None and (lock.stream is None or lock.path.resolve() != (self.root / "worker.lock").resolve()):
             raise ValueError("Niepoprawna przekazana blokada wykonawcy.")
+        return lock
+
+    def heartbeat(self, stopped):
+        while not stopped.wait(5):
+            self.store.control(heartbeat=now())
+
+    def cleanup_completed(self, scope):
+        for job in self.store.jobs():
+            if job["status"] != "done" or not in_scope(job, scope):
+                continue
+            folder = job_folder(self.root, job)
+            work = folder / "robocze"
+            leftovers = (work / "audio.f32le").exists() or any(p.suffix != ".json" for p in work.glob("download.*"))
+            if leftovers and verify_outputs(folder, job["identity"]):
+                cleanup(work, job)
+
+    def process_one(self, job):
+        self.current = job
+        self.last_update = 0
+        self.store.update(job["id"], attempts=job["attempts"] + 1)
+        try:
+            self.processor(job)
+        except MediaError as exc:
+            self.store.update(job["id"], status=exc.status, error=str(exc), stage="Zatrzymano etap")
+            if exc.status == "blocked":
+                self.store.control(stop=1, message="Kolejka wstrzymana. " + str(exc))
+        except ResourceError as exc:
+            self.store.update(job["id"], status="error", error=str(exc), stage="Wymaga działania")
+            self.store.control(stop=1, message=str(exc))
+        except Exception as exc:
+            logging.exception("Błąd zadania %s", job["identity"])
+            self.store.update(job["id"], status="error", error=str(exc)[:2500], stage="Błąd")
+            if isinstance(exc, (MemoryError, OSError)):
+                self.store.control(stop=1, message=str(exc))
+        finally:
+            self.store.control(current_id=None)
+            self.current = None
+
+    def consume(self, max_jobs):
+        processed = 0
+        with windows_sleep_guard():
+            while max_jobs is None or processed < max_jobs:
+                job = self.store.claim()
+                if job is None:
+                    break
+                self.process_one(job)
+                processed += 1
+
+    def run(self, check=True, max_jobs=None, *, _held_lock=None):
+        lock = self.execution_lock(_held_lock)
+        if lock is None:
+            return False
         heartbeat_stop = threading.Event()
-        def heartbeat():
-            while not heartbeat_stop.wait(5):
-                self.store.control(heartbeat=now())
-        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread = threading.Thread(target=self.heartbeat, args=(heartbeat_stop,), daemon=True)
         try:
             self.store.control(state="running", pid=os.getpid(), heartbeat=now(), message="")
             self.store.recover()
@@ -166,41 +217,9 @@ class Worker:
             if check:
                 preflight(self.config, self.root, kind=scope["scope_kind"])
             # Retry only cleanup of verified completed jobs, never inference.
-            for job in self.store.jobs():
-                if job["status"] == "done" and in_scope(job, scope):
-                    folder = job_folder(self.root, job)
-                    work = folder / "robocze"
-                    leftovers = (work / "audio.f32le").exists() or any(p.suffix != ".json" for p in work.glob("download.*"))
-                    if leftovers and verify_outputs(folder, job["identity"]):
-                        cleanup(folder / "robocze", job)
+            self.cleanup_completed(scope)
             thread.start()
-            processed = 0
-            with windows_sleep_guard():
-                while max_jobs is None or processed < max_jobs:
-                    job = self.store.claim()
-                    if job is None:
-                        break
-                    self.current = job
-                    self.last_update = 0
-                    self.store.update(job["id"], attempts=job["attempts"] + 1)
-                    try:
-                        self.processor(job)
-                    except MediaError as exc:
-                        self.store.update(job["id"], status=exc.status, error=str(exc), stage="Zatrzymano etap")
-                        if exc.status == "blocked":
-                            self.store.control(stop=1, message="Kolejka wstrzymana. " + str(exc))
-                    except ResourceError as exc:
-                        self.store.update(job["id"], status="error", error=str(exc), stage="Wymaga działania")
-                        self.store.control(stop=1, message=str(exc))
-                    except Exception as exc:
-                        logging.exception("Błąd zadania %s", job["identity"])
-                        self.store.update(job["id"], status="error", error=str(exc)[:2500], stage="Błąd")
-                        if isinstance(exc, (MemoryError, OSError)):
-                            self.store.control(stop=1, message=str(exc))
-                    finally:
-                        self.store.control(current_id=None)
-                        self.current = None
-                    processed += 1
+            self.consume(max_jobs)
         except Exception as exc:
             logging.exception("Wykonawca został wstrzymany")
             self.store.control(stop=1, message=str(exc))

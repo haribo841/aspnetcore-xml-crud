@@ -137,7 +137,7 @@ class ScopedQueueTests(unittest.TestCase):
             rows = list(csv.reader(stream, delimiter=';'))
         self.assertEqual(len(rows), 4)
         self.assertTrue(all(row[0].startswith('local:') for row in rows[1:]))
-        self.assertEqual((self.store.control(), self.store.jobs()), before)
+        self.assertEqual(before, (self.store.control(), self.store.jobs()))
 
 
 class MigrationTests(unittest.TestCase):
@@ -206,7 +206,7 @@ class LaunchTests(unittest.TestCase):
                 with patch('batch.worker.subprocess.Popen') as popen, self.assertRaises(ResourceError):
                     launch(root, kind='youtube')
                 popen.assert_not_called()
-                self.assertEqual((store.control(), store.jobs()), before)
+                self.assertEqual(before, (store.control(), store.jobs()))
             finally:
                 release.set()
                 thread.join(timeout=10)
@@ -289,8 +289,8 @@ class CLITests(unittest.TestCase):
                 patch('kolejka.logging.basicConfig'), patch('batch.worker.launch') as spawn, \
                 patch('batch.worker.wait_for_launch') as wait:
             kolejka.main()
-            spawn.assert_called_once_with(Path(folder), kind='all', job_ids=None)
-            wait.assert_called_once_with(Path(folder))
+            spawn.assert_called_once_with(Path(folder).resolve(), kind='all', job_ids=None)
+            wait.assert_called_once_with(Path(folder).resolve())
 
     def test_cli_start_passes_kind_and_ids_without_rewriting_other_preferences(self):
         import kolejka
@@ -299,7 +299,7 @@ class CLITests(unittest.TestCase):
                 patch('kolejka.logging.basicConfig'), patch('batch.worker.launch') as spawn, \
                 patch('batch.worker.wait_for_launch'):
             kolejka.main()
-            spawn.assert_called_once_with(Path(folder), kind='local', job_ids=[2, 4])
+            spawn.assert_called_once_with(Path(folder).resolve(), kind='local', job_ids=[2, 4])
 
     def test_gui_local_folder_only_selects_and_prefills_without_import_or_start(self):
         import kolejka

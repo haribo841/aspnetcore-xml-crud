@@ -1,0 +1,4 @@
+# Lightweight audio fixtures for offline UVR regression tests, no model weights.
+soundfile==0.14.0
+cffi==2.1.1
+pycparser==3.0

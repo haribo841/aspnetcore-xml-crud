@@ -8,23 +8,24 @@ import subprocess
 
 from .common import APP, NO_WINDOW, ResourceError, atomic_json, check_disk, digest, read_json, signature
 from .media import probe
+from .paths import child_path, input_file, local_path, media_tool, output_file
 from .processes import ChildGuard
 
 
 def validate_uvr(config):
     if not Path(config["uvr_python"]).is_file():
         raise ResourceError("Brak środowiska UVR. Uruchom Instaluj-UVR.ps1.")
-    directory = Path(config["uvr_model_dir"])
+    directory = local_path(config["uvr_model_dir"])
     for name in (config["uvr_model"], "download_checks.json", "mdx_model_data.json", "vr_model_data.json", "gotowe.json"):
-        if not (directory / name).is_file():
+        if not child_path(directory, name).is_file():
             raise ResourceError("Brak modelu UVR. Kliknij Pobierz model UVR.")
 
 
 def separate(source, work, folder, track, config, progress):
     validate_uvr(config)
-    source, work, folder = Path(source), Path(work), Path(folder)
+    source, work, folder = input_file(source), local_path(work), local_path(folder)
     key = signature({"source": digest(source), "track": track, "model": config["uvr_model"],
-                     "model_sha256": digest(Path(config["uvr_model_dir"]) / config["uvr_model"]),
+                     "model_sha256": digest(child_path(config["uvr_model_dir"], config["uvr_model"])),
                      "seconds": config["uvr_seconds"], "context": config["uvr_context"], "version": 1})
     output = folder / "audio" / "wokal.flac"
     manifest = read_json(work / "uvr-result.json")
@@ -61,26 +62,38 @@ def separate(source, work, folder, track, config, progress):
     return output, manifest
 
 
+def cached_archive(audio_dir, source_hash, track):
+    try:
+        saved = read_json(child_path(audio_dir, "zrodlo.json"))
+        if saved and saved.get("source_sha256") == source_hash and saved.get("track") == track:
+            path = child_path(audio_dir, saved["file"])
+            if path.is_file() and digest(path) == saved["sha256"]:
+                return path
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
 def archive_source(source, folder, track, config):
-    source, folder = Path(source), Path(folder)
-    audio_dir = folder / "audio"
+    source, folder = input_file(source), local_path(folder)
+    audio_dir = child_path(folder, "audio")
     audio_dir.mkdir(parents=True, exist_ok=True)
     source_hash = digest(source)
-    saved = read_json(audio_dir / "zrodlo.json")
-    if saved and saved.get("source_sha256") == source_hash and saved.get("track") == track:
-        path = audio_dir / saved["file"]
-        if path.is_file() and digest(path) == saved["sha256"]:
-            return path
+    cached = cached_archive(audio_dir, source_hash, track)
+    if cached is not None:
+        return cached
     metadata = probe(source, config)
     muxed = any(s.get("codec_type") == "video" for s in metadata["streams"])
-    destination = audio_dir / ("zrodlo.mka" if muxed else "zrodlo" + source.suffix.lower())
-    temporary = destination.with_name(destination.name + ".partial")
+    destination = output_file(child_path(audio_dir, "zrodlo.mka" if muxed else "zrodlo" + source.suffix.lower()))
+    temporary = output_file(destination.with_name(destination.name + ".partial"))
+    if source in {destination, temporary}:
+        raise ResourceError("Archiwizacja nie może nadpisać pliku źródłowego.")
     check_disk(folder, source.stat().st_size, config["min_free_gb"])
     if muxed:
         with (audio_dir / "archiwizacja.log").open("wb") as log:
-            process = subprocess.Popen([config["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(source), "-map", f"0:a:{track}", "-vn", "-c:a", "copy", "-f", "matroska", str(temporary)],
-                stderr=log, stdout=subprocess.DEVNULL, creationflags=NO_WINDOW)
+            process = subprocess.Popen([media_tool(config["ffmpeg"], "ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", f"0:a:{track}", "-vn", "-c:a", "copy", "-f", "matroska", str(temporary)],
+                stderr=log, stdout=subprocess.DEVNULL, creationflags=NO_WINDOW, shell=False)
             with ChildGuard(process):
                 code = process.wait()
             if code:

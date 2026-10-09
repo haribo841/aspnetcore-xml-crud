@@ -52,7 +52,7 @@ def smoke_test(root, source=None):
     config["diarization"] = True
     atomic_json(test_root / "ustawienia.json", config)
     store = Store(test_root)
-    imported = import_local(store, [source])
+    import_local(store, [source])
     wanted = "local:" + digest(source)
     # A previous failed sample must not be chosen in place of the new one.
     for job in store.jobs():

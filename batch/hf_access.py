@@ -11,7 +11,7 @@ TOKENS_URL = "https://huggingface.co/settings/tokens"
 def redact(message, token=""):
     if token:
         message = str(message).replace(token, "[token ukryty]")
-    return re.sub(r"hf_[A-Za-z0-9_]+", "[token ukryty]", str(message))
+    return re.sub(r"hf_\w+", "[token ukryty]", str(message), flags=re.ASCII)
 
 
 def access_error(exc, token=""):

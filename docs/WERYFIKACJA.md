@@ -1,5 +1,9 @@
 # Walidacja samodzielnego checkoutu
 
+09.10.2026: publikacja przygotowanych napraw CI i Sonar na polecenie użytkownika. Lokalne sprawdzenia i zakres zmian opisano w [raporcie napraw](SONAR-2026-10-08.md). Wyniki GitHub Actions i SonarCloud dla nowego commitu należy sprawdzić osobno po push; wcześniejsze błędy dotyczyły `5c8f960`.
+
+08.10.2026, po publikacji: GitHub Actions zgłosił dwie błędne asercje porównujące alias katalogu Windows ze ścieżką kanoniczną, a SonarCloud odrzucił bramkę bezpieczeństwa. Przygotowano lokalne naprawy i testy regresyjne. Przechodzą 132 testy bez pominięć, także przez alias katalogu tymczasowego, oraz kompilacja, `pip check` i sprawdzenie diff. Szczegóły i granice walidacji: [raport CI i Sonar](SONAR-2026-10-08.md). Poprawki pozostają niezatwierdzone z powodu wykorzystanego dziennego limitu publikacji; status zdalnego CI i Sonar nadal jest negatywny.
+
 08.10.2026: przed publikacją bieżącej wersji ponownie przeszło 111 testów bez pominięć, kompilacja modułów i `pip check`, na Pythonie 3.13.1. Kod zmienionych modułów oraz skrót karty lokalnej są identyczne z obecną instalacją aplikacji. Zachowano bajtową kopię poprzedniego głównego README. Testy używały katalogów tymczasowych i danych syntetycznych; nie uruchamiano produkcyjnej kolejki. Wynik GitHub Actions dla nowego commitu sprawdzany jest osobno po push.
 
 06.10.2026, po dodaniu karty lokalnej: lokalnie przeszło 111 testów tego checkoutu oraz 102 testy zaktualizowanej istniejącej instalacji, bez pominięć. Serie uruchomiono istniejącym interpreterem Python 3.13.1 i jego zainstalowanymi zależnościami. Nie instalowano nowych modeli ani nie uruchamiano pełnej kolejki. Nowe zmiany pozostają lokalne. [GitHub Actions dla wcześniejszego commitu f7cf580](https://github.com/haribo841/kolejka-transkrypcji/actions/runs/37438503418) przeszło, ale nie obejmuje jeszcze rozbudowy karty lokalnej.

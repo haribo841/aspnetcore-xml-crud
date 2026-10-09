@@ -17,7 +17,11 @@ from .asr import checkpoint, valid_checkpoint
 from .common import (NO_WINDOW, WorkerLock, atomic_json, blocks, check_disk, digest,
                      read_json, remove_work_file, settings, signature)
 from .media import probe
+from .paths import child_path, input_file, local_path, media_tool, output_file, within_root
 from .processes import ChildGuard
+
+
+UVR_STATE_FILE = 'konfiguracja-uvr.json'
 
 UVR_RATE = 44100
 
@@ -27,6 +31,8 @@ def emit(message, percent=0):
 
 
 def separator(config, output, online=False, force_cpu=False):
+    directory = local_path(config["uvr_model_dir"])
+    model_name = str(child_path(directory, config["uvr_model"]).relative_to(directory))
     import torch
     import onnxruntime as ort
     # Load matching CUDA/cuDNN DLLs from the isolated PyTorch installation.
@@ -38,7 +44,7 @@ def separator(config, output, online=False, force_cpu=False):
             raise RuntimeError("UVR pracuje offline. Pobierz kompletny model przed uruchomieniem kolejki.")
         requests.sessions.Session.request = offline
     from audio_separator.separator import Separator
-    engine = Separator(log_level=logging.WARNING, model_file_dir=config["uvr_model_dir"],
+    engine = Separator(log_level=logging.WARNING, model_file_dir=str(directory),
         output_dir=str(output), output_format="WAV", output_single_stem="Vocals",
         use_soundfile=True, normalization_threshold=1.0, amplification_threshold=0.0,
         sample_rate=UVR_RATE, mdx_params={"hop_length": 1024, "segment_size": 256,
@@ -46,41 +52,120 @@ def separator(config, output, online=False, force_cpu=False):
     if force_cpu:
         engine.torch_device = torch.device("cpu")
         engine.onnx_execution_provider = ["CPUExecutionProvider"]
-    engine.load_model(config["uvr_model"])
+    engine.load_model(model_name)
     return engine
 
 
 def setup(root):
-    root = Path(root)
+    root = local_path(root)
     config = settings(root)
-    directory = Path(config["uvr_model_dir"])
+    directory = local_path(config["uvr_model_dir"])
+    child_path(directory, config["uvr_model"])
     directory.mkdir(parents=True, exist_ok=True)
     lock = WorkerLock(directory)
     if not lock.acquire():
         return
     try:
-        atomic_json(root / "konfiguracja-uvr.json", {"state": "running", "message": "Pobieranie i sprawdzanie modelu UVR"})
-        engine = separator(config, directory / "test", online=True)
+        atomic_json(root / UVR_STATE_FILE, {"state": "running", "message": "Pobieranie i sprawdzanie modelu UVR"})
+        separator(config, directory / "test", online=True)
         manifest = {"model": config["uvr_model"], "version": importlib.metadata.version("audio-separator"),
-                    "files": {name: digest(directory / name) for name in (config["uvr_model"],
+                    "files": {name: digest(child_path(directory, name)) for name in (config["uvr_model"],
                         "download_checks.json", "vr_model_data.json", "mdx_model_data.json")}}
         atomic_json(directory / "gotowe.json", manifest)
-        atomic_json(root / "konfiguracja-uvr.json", {"state": "ready", "message": "Model UVR gotowy"})
+        atomic_json(root / UVR_STATE_FILE, {"state": "ready", "message": "Model UVR gotowy"})
     except Exception as exc:
-        atomic_json(root / "konfiguracja-uvr.json", {"state": "error", "message": str(exc)[:1500]})
+        atomic_json(root / UVR_STATE_FILE, {"state": "error", "message": str(exc)[:1500]})
         raise
     finally:
         lock.close()
 
 
-def run(request):
+def request_paths(request):
+    source = input_file(request["source"])
+    work = local_path(request["work"])
+    output = output_file(request["output"], suffix=".flac")
+    if work.name != "robocze" or output != child_path(work.parent, "audio/wokal.flac"):
+        raise ValueError("UVR może zapisywać tylko wokal w katalogu bieżącego nagrania.")
+    if source == output or source.is_relative_to(child_path(work, "uvr")):
+        raise ValueError("Źródło UVR nie może być jego plikiem pośrednim ani wynikowym.")
+    return source, work, output
+
+
+def generated_vocal(stage, filename):
+    name = Path(filename)
+    path = within_root(name, stage) if name.is_absolute() else child_path(stage, name)
+    return input_file(path)
+
+
+def prepare_input(source, config, track, stage, block):
+    path = output_file(child_path(stage, "input.wav"))
+    command = [media_tool(config["ffmpeg"], "ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-y",
+        "-ss", str(block["start"]), "-protocol_whitelist", "file,pipe", "-i", str(source),
+        "-t", str(block["end"] - block["start"]), "-map", f"0:a:{track}", "-vn", "-ac", "2", "-ar", str(UVR_RATE),
+        "-c:a", "pcm_f32le", str(path)]
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=sys.stderr, creationflags=NO_WINDOW, shell=False)
+    with ChildGuard(process):
+        if process.wait():
+            raise RuntimeError("FFmpeg nie przygotował bloku do UVR.")
+    return path
+
+
+def separate_vocal(engine, config, stage, source):
+    try:
+        filenames = engine.separate(str(source))
+    except Exception as exc:
+        if not any(term in str(exc).casefold() for term in ("cuda", "cudnn", "cublas", "gpu", "out of memory")):
+            raise
+        emit("UVR: próba GPU nieudana, ponawiam blok na CPU: " + str(exc)[:250])
+        engine = separator(config, stage, force_cpu=True)
+        filenames = engine.separate(str(source))
+    if len(filenames) != 1:
+        raise RuntimeError("UVR nie zwrócił dokładnie jednej ścieżki Vocals.")
+    return engine, generated_vocal(stage, filenames[0])
+
+
+def write_vocal_block(generated, stem, block):
     import numpy as np
     import soundfile as sf
+    samples, rate = sf.read(generated, dtype="float32", always_2d=True)
+    if rate != UVR_RATE or not np.isfinite(samples).all():
+        raise RuntimeError("UVR zwrócił niepoprawne audio.")
+    left = round(block["core_start"] * rate) - round(block["start"] * rate)
+    expected = round(block["core_end"] * rate) - round(block["core_start"] * rate)
+    if len(samples) < left + expected:
+        deficit = left + expected - len(samples)
+        if deficit > rate * .05:
+            raise RuntimeError("UVR skrócił nagranie; nie można zachować timestampów.")
+        samples = np.pad(samples, ((0, deficit), (0, 0)))
+    temporary = output_file(stem.with_suffix(".partial"))
+    sf.write(temporary, samples[left:left + expected], rate, format="FLAC", subtype="PCM_24")
+    with temporary.open("r+b") as stream:
+        os.fsync(stream.fileno())
+    os.replace(temporary, stem)
+    return expected
+
+
+def join_vocal_blocks(output, jobs, block_dir, duration):
+    import soundfile as sf
+    temporary = output_file(output.with_suffix(".partial"))
+    with sf.SoundFile(temporary, "w", samplerate=UVR_RATE, channels=2, format="FLAC", subtype="PCM_24") as writer:
+        for block in jobs:
+            with sf.SoundFile(child_path(block_dir, f"{block['index']:06}.flac")) as reader:
+                for samples in reader.blocks(blocksize=UVR_RATE * 30, dtype="float32", always_2d=True):
+                    writer.write(samples)
+    with temporary.open("r+b") as stream:
+        os.fsync(stream.fileno())
+    if sf.info(temporary).frames != round(duration * UVR_RATE):
+        raise RuntimeError("Długość połączonego wokalu jest niepoprawna.")
+    os.replace(temporary, output)
+
+
+def run(request):
     config = request["config"]
-    source, work, output = Path(request["source"]), Path(request["work"]), Path(request["output"])
+    source, work, output = request_paths(request)
     duration = float(probe(source, config)["format"]["duration"])
     jobs = list(blocks(duration, config["uvr_seconds"], config["uvr_context"]))
-    block_dir = work / "uvr"
+    block_dir = child_path(work, "uvr")
     block_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     check_disk(output.parent, duration * UVR_RATE * 2 * 3 * 2, config["min_free_gb"])
@@ -89,76 +174,32 @@ def run(request):
     for block in jobs:
         index = block["index"]
         key = signature({"request": request["signature"], "block": block})
-        manifest_path = block_dir / f"{index:06}.json"
-        stem = block_dir / f"{index:06}.flac"
+        manifest_path = child_path(block_dir, f"{index:06}.json")
+        stem = child_path(block_dir, f"{index:06}.flac")
         saved = valid_checkpoint(manifest_path, key)
         if saved and stem.is_file() and digest(stem) == saved["sha256"]:
             parts.append(saved)
             emit(f"UVR: odtworzono blok {index + 1}/{len(jobs)}", (index + 1) / len(jobs) * 100)
             continue
         emit(f"UVR: separacja bloku {index + 1}/{len(jobs)}", index / len(jobs) * 100)
-        stage = block_dir / "biezacy"
+        stage = child_path(block_dir, "biezacy")
         stage.mkdir(exist_ok=True)
-        input_file = stage / "input.wav"
-        command = [config["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", str(block["start"]), "-i", str(source), "-t", str(block["end"] - block["start"]),
-            "-map", f"0:a:{request['track']}", "-vn", "-ac", "2", "-ar", str(UVR_RATE),
-            "-c:a", "pcm_f32le", str(input_file)]
-        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=sys.stderr, creationflags=NO_WINDOW)
-        with ChildGuard(process):
-            if process.wait():
-                raise RuntimeError("FFmpeg nie przygotował bloku do UVR.")
+        prepared = prepare_input(source, config, request["track"], stage, block)
         if engine is None:
             engine = separator(config, stage)
         started = time.perf_counter()
-        try:
-            filenames = engine.separate(str(input_file))
-        except Exception as exc:
-            if not any(term in str(exc).casefold() for term in ("cuda", "cudnn", "cublas", "gpu", "out of memory")):
-                raise
-            emit("UVR: próba GPU nieudana, ponawiam blok na CPU: " + str(exc)[:250])
-            engine = separator(config, stage, force_cpu=True)
-            filenames = engine.separate(str(input_file))
-        if len(filenames) != 1:
-            raise RuntimeError("UVR nie zwrócił dokładnie jednej ścieżki Vocals.")
-        generated = Path(filenames[0])
-        if not generated.is_absolute():
-            generated = stage / generated
-        samples, rate = sf.read(generated, dtype="float32", always_2d=True)
-        if rate != UVR_RATE or not np.isfinite(samples).all():
-            raise RuntimeError("UVR zwrócił niepoprawne audio.")
         # Cut context only, no silence removal or time stretching. Sample indexes
         # are computed from absolute boundaries to prevent accumulated drift.
-        left = round(block["core_start"] * rate) - round(block["start"] * rate)
-        expected = round(block["core_end"] * rate) - round(block["core_start"] * rate)
-        if len(samples) < left + expected:
-            deficit = left + expected - len(samples)
-            if deficit > rate * .05:
-                raise RuntimeError("UVR skrócił nagranie; nie można zachować timestampów.")
-            samples = np.pad(samples, ((0, deficit), (0, 0)))
-        temp = stem.with_suffix(".partial")
-        sf.write(temp, samples[left:left + expected], rate, format="FLAC", subtype="PCM_24")
-        with temp.open("r+b") as stream:
-            os.fsync(stream.fileno())
-        os.replace(temp, stem)
+        engine, generated = separate_vocal(engine, config, stage, prepared)
+        expected = write_vocal_block(generated, stem, block)
         saved = {"signature": key, "block": block, "frames": expected, "sha256": digest(stem),
                  "device": str(engine.torch_device), "seconds": time.perf_counter() - started}
         checkpoint(manifest_path, saved)
         parts.append(saved)
-        remove_work_file(input_file, work)
+        remove_work_file(prepared, work)
         remove_work_file(generated, work)
         emit(f"UVR: zapisano blok {index + 1}/{len(jobs)}", (index + 1) / len(jobs) * 100)
-    temporary = output.with_suffix(".partial")
-    with sf.SoundFile(temporary, "w", samplerate=UVR_RATE, channels=2, format="FLAC", subtype="PCM_24") as writer:
-        for block in jobs:
-            with sf.SoundFile(block_dir / f"{block['index']:06}.flac") as reader:
-                for samples in reader.blocks(blocksize=UVR_RATE * 30, dtype="float32", always_2d=True):
-                    writer.write(samples)
-    with temporary.open("r+b") as stream:
-        os.fsync(stream.fileno())
-    if sf.info(temporary).frames != round(duration * UVR_RATE):
-        raise RuntimeError("Długość połączonego wokalu jest niepoprawna.")
-    os.replace(temporary, output)
+    join_vocal_blocks(output, jobs, block_dir, duration)
     atomic_json(work / "uvr-result.json", {"signature": request["signature"], "sha256": digest(output),
                 "model": config["uvr_model"], "version": importlib.metadata.version("audio-separator"),
                 "duration": duration, "blocks": parts, "output": str(output)})

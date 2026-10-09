@@ -172,16 +172,30 @@ def download(args):
     print(f"Model gotowy: {destination}")
 
 
+def generation_options(pipe, args):
+    generation = {"task": "transcribe", "return_timestamps": True}
+    if args.language != "auto":
+        language = args.language if args.language.startswith("<|") else f"<|{args.language}|>"
+        if language not in pipe.get_generation_config().lang_to_id:
+            raise ValueError(f"Język {args.language!r} jest niedostępny w tym modelu.")
+        generation["language"] = language
+    if args.word_timestamps:
+        generation["word_timestamps"] = True
+    for name in ("hotwords", "initial_prompt"):
+        value = getattr(args, name)
+        if value:
+            generation[name] = value
+    return generation
+
+
 def transcribe(args):
+    from batch.paths import input_file, local_path, media_tool
     run_started = time.perf_counter()
-    source = args.audio.resolve(strict=True)
-    if not source.is_file():
-        raise ValueError("Wejście musi być lokalnym plikiem audio lub wideo.")
-    model_dir = args.model.resolve()
+    source = input_file(args.audio)
+    model_dir = local_path(args.model)
     validate_model(model_dir)
-    ffmpeg = find_ffmpeg(args.ffmpeg)
-    output_dir = (args.output or ROOT / "outputs" /
-                  datetime.now().strftime("%Y%m%d-%H%M%S-%f")).resolve()
+    ffmpeg = media_tool(find_ffmpeg(args.ffmpeg), "ffmpeg")
+    output_dir = local_path(args.output or ROOT / "outputs" / datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
     if output_dir.exists():
         raise FileExistsError(f"Katalog wynikowy już istnieje: {output_dir}. Wybierz nowy.")
 
@@ -191,25 +205,15 @@ def transcribe(args):
 
     core = ov.Core()
     device = checked_device(core, args.device.upper())
-    options = {"CACHE_DIR": str(args.cache.resolve())}
-    args.cache.mkdir(parents=True, exist_ok=True)
+    cache = local_path(args.cache)
+    options = {"CACHE_DIR": str(cache)}
+    cache.mkdir(parents=True, exist_ok=True)
     if args.word_timestamps:
         options["word_timestamps"] = True
     print(f"Inicjalizacja modelu: {device} ({core.get_property(device, 'FULL_DEVICE_NAME')})", flush=True)
     pipe = genai.WhisperPipeline(str(model_dir), device, **options)
     startup_s = time.perf_counter() - started
-    generation = {"task": "transcribe", "return_timestamps": True}
-    if args.language != "auto":
-        language = args.language if args.language.startswith("<|") else f"<|{args.language}|>"
-        if language not in pipe.get_generation_config().lang_to_id:
-            raise ValueError(f"Język {args.language!r} jest niedostępny w tym modelu.")
-        generation["language"] = language
-    if args.word_timestamps:
-        generation["word_timestamps"] = True
-    if args.hotwords:
-        generation["hotwords"] = args.hotwords
-    if args.initial_prompt:
-        generation["initial_prompt"] = args.initial_prompt
+    generation = generation_options(pipe, args)
 
     print("Dekodowanie do mono 16 kHz...", flush=True)
     started = time.perf_counter()
