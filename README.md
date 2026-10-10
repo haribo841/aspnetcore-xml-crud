@@ -8,6 +8,9 @@ Aplikacja Windows napisana w Pythonie, z oknem Tkinter/ttk. Przetwarza kolejkę 
 
 - Import katalogu YouTube z XLSX, plików lokalnych i folderów z podfolderami. Ponowny import pomija duplikaty i zachowuje ukończone pozycje.
 - Osobne karty Kolejka YouTube i Kolejka lokalna. Start w karcie obejmuje tylko jej nagrania; opcja zaznaczonych ogranicza sesję bez wyłączania innych pozycji.
+- Nawigacja do bieżącego lub pierwszego oczekującego nagrania, czas trwania oraz zachowanie przewijania i zaznaczenia przy odświeżaniu.
+- Karta Konfiguracja z kontrolą plików i środowisk w tle oraz datowaną próbą do 60 sekund, uwzględniającą aktualne opcje UVR i mówców.
+- Wybór miejsca wyników lokalnych: własny podfolder obok źródła, folder centralny lub wskazany folder. Istniejące zadania zachowują swoje miejsca.
 - Jeden materiał naraz, kolejność chronologiczna, filtry, wybór języka i ścieżki audio.
 - Start/Wznów oraz Dokończ bieżący i zatrzymaj. Zamknięcie okna pozostawia wykonawcę w tle; aplikację można ponownie otworzyć.
 - Punkty wznowienia transkrypcji, diarizacji i UVR. Po awarii ukończone bloki są sprawdzane i wykorzystywane ponownie.
@@ -47,7 +50,7 @@ Instalatory nie podnoszą wersji bibliotek ponad pliki `requirements-*.lock.txt`
 .\Instaluj-UVR.ps1 -Interpreter 'C:\Python312\python.exe'
 ```
 
-W oknie wybierz Konfiguracja mówców, zaakceptuj dostęp do [Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), sprawdź token Read i pobierz model. Po pobraniu kliknij Uruchom krótką próbę i wskaż własne nagranie mowy do 2 minut. Sprawdź tekst i etykiety mówców przed dużą sesją. Import nie rozpoczyna pracy; kolejkę uruchamia przycisk Start/Wznów.
+W karcie Konfiguracja wybierz Konfiguracja Community-1, zaakceptuj dostęp do [Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), sprawdź token Read i pobierz model. Ustaw UVR oraz mówców, a następnie kliknij Sprawdź na fragmencie. Możesz wskazać długie nagranie; program przetworzy do 60 sekund. Sprawdź tekst i etykiety mówców przed dużą sesją. Import nie rozpoczyna pracy; kolejkę uruchamia przycisk Start/Wznów.
 
 Domyślny folder danych to `%USERPROFILE%\Transkrypcje`, poza repozytorium. Inny folder wybiera się przez `KOLEJKA_ROOT` przed uruchomieniem albo parametr `--root`:
 
@@ -56,11 +59,13 @@ Domyślny folder danych to `%USERPROFILE%\Transkrypcje`, poza repozytorium. Inny
 .\.venv\Scripts\python.exe kolejka.py --root 'D:\Transkrypcje' status
 ```
 
-Nie ma automatycznego przenoszenia wcześniejszej bazy ani gotowych wyników. Istniejący folder danych można wskazać świadomie po sprawdzeniu ścieżek modeli i narzędzi w jego `ustawienia.json`. Jedna baza dopuszcza jednego wykonawcę.
+Nie ma automatycznego przenoszenia wcześniejszej bazy ani gotowych wyników. Istniejący folder danych można wskazać świadomie po sprawdzeniu ścieżek modeli i narzędzi w jego `ustawienia.json`. Jedna baza dopuszcza jednego wykonawcę. Aktualizowana instalacja może zapamiętać dotychczasową bazę w lokalnym, ignorowanym przez Git pliku `lokalna-instalacja.json` z polem `root`. Parametr `--root` i zmienna `KOLEJKA_ROOT` mają pierwszeństwo.
 
 ## Kolejka lokalna
 
-W karcie **Kolejka lokalna** wybierz folder i kliknij **Dodaj folder do kolejki**, albo dodaj pojedyncze pliki. Skrót **Uruchom-kolejke-lokalna.vbs** otwiera tę kartę z ostatnio wybranym folderem. Możesz uwzględnić podfoldery lub ograniczyć import do M4A. Lista, liczniki, raport CSV i ponawianie błędów obejmują wyłącznie lokalne nagrania. Kopie o tym samym SHA-256 zajmują jedną pozycję w kolejce; oryginały i istniejące transkrypcje pozostają na miejscu.
+W karcie **Kolejka lokalna** wybierz folder i kliknij **Dodaj folder**, albo dodaj pojedyncze pliki. Skrót **Uruchom-kolejke-lokalna.vbs** otwiera tę kartę z ostatnio wybranym folderem. Możesz uwzględnić podfoldery lub ograniczyć import do M4A. Lista, liczniki, raport CSV i ponawianie błędów obejmują wyłącznie lokalne nagrania. Kopie o tym samym SHA-256 zajmują jedną pozycję w kolejce; oryginały i istniejące transkrypcje pozostają na miejscu.
+
+Przed importem wybierz miejsce wyników. Domyślnie nowy plik dostaje osobny podfolder obok źródła, z krótkim tytułem i stabilnym ID. Dla zaznaczonych, nierozpoczętych zadań służy **Zmień miejsce wyników**. Nie przenosi gotowych ani częściowych wyników. FFmpeg obsługuje audio i wideo, w tym WAV, MP3, M4A/AAC, FLAC, OGG/Opus, MKV, MP4, WebM, MOV i AVI; pliki bez audio lub uszkodzone dostają osobny komunikat.
 
 **Start/Wznów lokalne** nie uruchamia materiałów YouTube. Gdy trwa inna sesja, dokończ jej bieżące nagranie i zatrzymaj ją przed przełączeniem. Wznowienie wykorzystuje te same punkty kontrolne i wyniki, a zamknięcie okna nie przerywa wykonawcy. Opcje UVR i zachowywania audio są wspólne dla obu kolejek. Przykład otwarcia karty z wybranym folderem, bez importu lub automatycznego Start:
 
@@ -84,7 +89,7 @@ Lokalne etapy ASR, mówców i UVR nie wysyłają audio do chmury. Cookies oraz t
 .\.venv\Scripts\python.exe transcribe.py transcribe --help
 ```
 
-Testy używają danych syntetycznych i katalogów tymczasowych. Pobieranie YouTube, model ASR i model mówców są zastępowane kontrolowanymi atrapami; próby FFmpeg używają syntetycznego audio i są pomijane, gdy narzędzia nie są zainstalowane. CI na Windows instaluje główny lockfile i uruchamia tę samą serię offline. Dłuższe testy infrastruktury wymagają jawnego wskazania lokalnego modelu oraz własnej próbki i są opisane w [walidacji](docs/WERYFIKACJA.md).
+Testy używają danych syntetycznych i katalogów tymczasowych. Pobieranie YouTube, model ASR i model mówców są zastępowane kontrolowanymi atrapami; próby FFmpeg używają syntetycznego audio i są pomijane, gdy narzędzia nie są zainstalowane. CI na Windows instaluje główny lockfile i FFmpeg 8.0.1 oraz uruchamia tę samą serię offline. Lokalna instalacja z FFmpeg 9 zachowuje swoją wersję. Dłuższe testy infrastruktury wymagają jawnego wskazania lokalnego modelu oraz własnej próbki i są opisane w [walidacji](docs/WERYFIKACJA.md).
 
 ## Historia
 

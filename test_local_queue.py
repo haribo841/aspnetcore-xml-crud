@@ -38,6 +38,12 @@ class LocalTabTests(unittest.TestCase):
         self.tk = tk.Tk()
         self.tk.withdraw()
         self.app = Window(self.root, tk_root=self.tk)
+        self.readiness_patch = patch("batch.gui.collect_readiness", return_value={
+            "components": {key: {"status": "Próba zaliczona", "message": "Offline test fixture"}
+                           for key in ("whisper", "tools", "diarization", "uvr", "youtube")},
+            "passed": True, "test": {"at": "test"}})
+        self.readiness_patch.start()
+        self.addCleanup(self.readiness_patch.stop)
         self.app.store.add_many([
             {"identity": "yt:abcdefghij0", "kind": "youtube", "title": "Film", "source": "https://youtube.com/watch?v=abcdefghij0", "date": "2020-01-01"},
             {"identity": "local:" + "a" * 64, "kind": "local", "title": "Wykład M4A", "source": str(self.root / "wyklad.m4a"), "date": "2021-01-01"},
@@ -58,7 +64,7 @@ class LocalTabTests(unittest.TestCase):
 
     def test_separate_tabs_lists_counts_and_tooltips(self):
         titles = [self.app.notebook.tab(tab, "text") for tab in self.app.notebook.tabs()]
-        self.assertEqual(titles, ["Kolejka YouTube", "Kolejka lokalna", "Obróbka transkrypcji"])
+        self.assertEqual(titles, ["Kolejka YouTube", "Kolejka lokalna", "Obróbka transkrypcji", "Konfiguracja"])
         self.assertEqual(set(self.app.tree.get_children()), {str(self.youtube_id)})
         self.assertEqual(set(self.app.local_tab.tree.get_children()), {str(i) for i in self.local_ids})
         self.assertIn("Lokalne: 2", self.app.local_tab.counts.get())

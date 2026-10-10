@@ -17,8 +17,8 @@ from .common import (APP, NO_WINDOW, ResourceError, WorkerLock, application_pyth
                      windows_sleep_guard)
 from .diarization import run_diarization, validate_diarization
 from .exporter import export, verify_outputs
-from .result_paths import assert_output_owner
-from .media import MediaError, decode, download
+from .result_paths import assert_output_owner, reserve_output
+from .media import MediaError, decode, download, media_metadata
 from .speakers import assign_words, cues_from_words, merge_speakers
 from .store import Store, in_scope, now, scope_kind
 from .uvr import archive_source, separate, validate_uvr
@@ -91,6 +91,8 @@ class Worker:
         config = self.config
         folder = job_folder(self.root, job)
         assert_output_owner(folder, job["identity"])
+        reserve_output(folder, job["identity"])
+        check_disk(folder, reserve_gb=config["min_free_gb"])
         work = folder / "robocze"
         work.mkdir(parents=True, exist_ok=True)
         execution = signature({"identity": job["identity"], "language": job["language"],
@@ -109,6 +111,7 @@ class Worker:
             self.progress("Sprawdzanie oryginalnego pliku", 0)
             if digest(source) != job["identity"].split(":", 1)[1]:
                 raise MediaError("Zawartość pliku lokalnego zmieniła się. Dodaj plik ponownie jako nowe nagranie.")
+        self.validate_audio(job, source)
         retained, uvr_report = [], None
         if config.get("keep_audio") or config.get("uvr_enabled"):
             self.progress("Zachowywanie źródłowej ścieżki audio", 0)
@@ -150,13 +153,22 @@ class Worker:
             # Outputs are valid. Keep evidence of cleanup failure, retry next start.
             self.store.update(job["id"], error="Wyniki gotowe; sprzątanie wymaga ponowienia: " + str(exc))
 
+    def validate_audio(self, job, source):
+        metadata = media_metadata(source, self.config)
+        if not 0 <= job["audio_track"] < len(metadata["audio_tracks"]):
+            raise MediaError("Wybrana ścieżka audio nie istnieje. Wybierz ścieżkę audio w oknie kolejki.")
+        if metadata["duration"] is not None:
+            self.store.update(job["id"], duration=metadata["duration"])
+        elif self.config.get("uvr_enabled"):
+            raise MediaError("Nie udało się ustalić długości audio wymaganej przez UVR. Wybierz inny plik lub wyłącz UVR dla tej sesji.")
+
     def execution_lock(self, held_lock):
-        lock = held_lock or WorkerLock(self.root)
-        if held_lock is None and not lock.acquire():
-            return None
-        if held_lock is not None and (lock.stream is None or lock.path.resolve() != (self.root / "worker.lock").resolve()):
-            raise ValueError("Niepoprawna przekazana blokada wykonawcy.")
-        return lock
+        if held_lock is not None:
+            if held_lock.stream is None or held_lock.path.resolve() != (self.root / "worker.lock").resolve():
+                raise ValueError("Niepoprawna przekazana blokada wykonawcy.")
+            return held_lock
+        lock = WorkerLock(self.root)
+        return lock if lock.acquire() else None
 
     def heartbeat(self, stopped):
         while not stopped.wait(5):
@@ -290,7 +302,10 @@ def launch(root, *, kind="all", job_ids=None):
         raise
     finally:
         worker_lock.close()
-    if process.poll() is not None:
+    code = process.poll()
+    if code is not None:
+        if code:
+            store.control(stop=1, message="Proces kolejki nie uruchomił się. Sprawdź worker.log i wznów ręcznie.")
         launch_lock.close()
     else:
         threading.Thread(target=_finish_launch, args=(root, process, launch_lock), daemon=True).start()

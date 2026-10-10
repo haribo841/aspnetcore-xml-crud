@@ -8,7 +8,7 @@ from pathlib import Path
 from .paths import output_file
 import sqlite3
 
-from .common import slug
+from .common import job_folder, slug
 
 STATUSES = {
     "pending": "Oczekuje", "running": "Przetwarzanie", "done": "Gotowe",
@@ -76,7 +76,7 @@ class Store:
                     kind TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL,
                     date TEXT DEFAULT '', visibility TEXT DEFAULT '',
                     duration REAL, source_meta TEXT DEFAULT '{}',
-                    folder TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                    folder TEXT NOT NULL, output_root TEXT, status TEXT NOT NULL DEFAULT 'pending',
                     enabled INTEGER DEFAULT 1, language TEXT DEFAULT 'auto',
                     audio_track INTEGER DEFAULT 0, stage TEXT DEFAULT '',
                     progress REAL DEFAULT 0, error TEXT DEFAULT '',
@@ -105,6 +105,9 @@ class Store:
                 db.execute("ALTER TABLE control ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'all'")
             if "scope_ids" not in columns:
                 db.execute("ALTER TABLE control ADD COLUMN scope_ids TEXT NOT NULL DEFAULT '[]'")
+            job_columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "output_root" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN output_root TEXT")
 
     @contextmanager
     def connect(self):
@@ -124,13 +127,17 @@ class Store:
             for row in rows:
                 stamp = now()
                 folder = slug(row["title"]) + "__" + row["identity"].replace(":", "-")
+                if row.get("output_root"):
+                    from .local_outputs import compact_folder
+                    folder = compact_folder(row["title"], row["identity"], row["output_root"])
                 cursor = db.execute('''INSERT OR IGNORE INTO jobs
-                    (identity,kind,title,source,date,visibility,duration,source_meta,folder,
-                     status,enabled,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    (identity,kind,title,source,date,visibility,duration,source_meta,folder,output_root,
+                     status,enabled,stage,error,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                     (row["identity"], row["kind"], row["title"], row["source"],
                      row.get("date", ""), row.get("visibility", ""), row.get("duration"),
-                     json.dumps(row.get("meta", {}), ensure_ascii=False), folder,
-                     row.get("status", "pending"), int(row.get("status") != "draft"), stamp, stamp))
+                     json.dumps(row.get("meta", {}), ensure_ascii=False), folder, row.get("output_root"),
+                     row.get("status", "pending"), int(row.get("status") != "draft"),
+                     row.get("stage", ""), row.get("error", ""), stamp, stamp))
                 count += cursor.rowcount
                 # A duplicate local file can be used if its old path disappeared.
                 old = db.execute("SELECT source,status FROM jobs WHERE identity=?", (row["identity"],)).fetchone()
@@ -241,7 +248,7 @@ class Store:
             rows = [row for row in rows if row["kind"] == kind]
         with path.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.writer(stream, delimiter=";")
-            writer.writerow(["ID", "Tytuł", "Data", "Typ", "Status", "Etap", "Postęp %", "Błąd", "Źródło", "Wyniki"])
+            writer.writerow(["ID", "Tytuł", "Data", "Typ", "Status", "Etap", "Postęp %", "Błąd", "Źródło", "Wyniki", "Czas trwania (s)"])
             for job in rows:
                 # Prevent spreadsheet formulas from imported titles / error text.
                 def safe(value):
@@ -249,4 +256,27 @@ class Store:
                     return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
                 writer.writerow(map(safe, [job["identity"], job["title"], job["date"], job["kind"],
                     STATUSES[job["status"]], job["stage"], round(job["progress"], 1), job["error"],
-                    job["source"], str(self.root / "wyniki" / job["folder"])]))
+                    job["source"], str(job_folder(self.root, job)), job["duration"] if job["duration"] is not None else ""]))
+
+    def change_output(self, ids, mode, custom=""):
+        from .local_outputs import compact_folder, output_root_for
+        if not ids:
+            raise ValueError("Zaznacz nagrania, dla których chcesz zmienić miejsce wyników.")
+        with self.connect() as db:
+            db.execute(BEGIN_WRITE)
+            control = db.execute(SELECT_CONTROL).fetchone()
+            if control["state"] == "running" or not control["stop"]:
+                raise ValueError("Najpierw dokończ bieżące nagranie i zatrzymaj sesję.")
+            selected = []
+            for ident in ids:
+                row = db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone()
+                if row is None:
+                    raise ValueError("Nie znaleziono wybranego nagrania.")
+                job = dict(row)
+                old = job_folder(self.root, job)
+                if job["kind"] != "local" or job["status"] in {"running", "done", "draft"} or job["attempts"] or (old.exists() and any(old.iterdir())):
+                    raise ValueError("Miejsce można zmienić tylko dla lokalnych nagrań bez rozpoczętego przetwarzania: " + job["title"])
+                base = output_root_for(job["source"], self.root, mode, custom)
+                selected.append((str(base), compact_folder(job["title"], job["identity"], base), now(), ident))
+            db.executemany("UPDATE jobs SET output_root=?,folder=?,updated=? WHERE id=?", selected)
+        return len(selected)

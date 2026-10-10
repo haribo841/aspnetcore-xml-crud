@@ -22,7 +22,7 @@ class AccessTests(unittest.TestCase):
     def test_smoke_test_requires_explicit_local_sample(self):
         from batch.setup_model import smoke_test
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "Wybierz krótkie nagranie"):
+            with self.assertRaisesRegex(ValueError, "Sprawdź na fragmencie"):
                 smoke_test(directory)
 
     def test_invalid_input_never_contacts_hugging_face(self):
@@ -182,13 +182,15 @@ class WizardTests(unittest.TestCase):
         self.assertIsNot(self.app.setup_dialog, self.wizard)
         self.assertEqual(self.app.setup_dialog.token_var.get(), "")
 
-    def test_start_with_missing_model_opens_setup_without_mutating_queue(self):
+    def test_start_with_missing_model_opens_configuration_without_mutating_queue(self):
         before = self.app.store.control()
-        with patch("batch.gui.validate_diarization", side_effect=ValueError("missing")), \
-                patch("batch.gui.launch") as launch:
+        with patch("batch.gui.messagebox.showerror") as popup, patch("batch.gui.launch") as launch:
             self.app.start()
             launch.assert_not_called()
+            popup.assert_not_called()
         self.assertEqual(before, self.app.store.control())
+        self.assertEqual(self.app.notebook.select(), str(self.app.config_page))
+        self.assertTrue((self.root / "ostatni-blad-start.json").is_file())
 
 
 if __name__ == "__main__":

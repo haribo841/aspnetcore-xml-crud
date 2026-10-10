@@ -12,12 +12,60 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import soundfile as sf
 
-from batch.common import atomic_bytes, atomic_json, digest, job_folder, remove_work_file
+from batch.common import WorkerLock, atomic_bytes, atomic_json, digest, job_folder, remove_work_file
 from batch.media import cached_download, probe
 from batch.paths import child_path, input_file, local_path, media_tool
 from batch.transcript_edit import remove_speakers
 from batch.uvr import archive_source, cached_archive
 from batch.uvr_child import UVR_RATE, generated_vocal, request_paths, separator, write_vocal_block
+from batch.worker import Worker
+
+
+class WorkerLockTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.worker = Worker(self.root)
+
+    def test_missing_lock_acquires_exclusive_ownership_and_releases_it(self):
+        lock = self.worker.execution_lock(None)
+        self.assertIsInstance(lock, WorkerLock)
+        self.addCleanup(lock.close)
+        self.assertTrue(WorkerLock.busy(self.root))
+        self.assertIsNone(self.worker.execution_lock(None))
+        lock.close()
+        self.assertFalse(WorkerLock.busy(self.root))
+
+    def test_already_acquired_lock_is_reused_without_reacquiring(self):
+        lock = WorkerLock(self.root)
+        self.addCleanup(lock.close)
+        self.assertTrue(lock.acquire())
+        with patch.object(lock, "acquire") as acquire:
+            self.assertIs(self.worker.execution_lock(lock), lock)
+            acquire.assert_not_called()
+        self.assertTrue(WorkerLock.busy(self.root))
+
+    def test_unacquired_or_released_lock_is_rejected(self):
+        lock = WorkerLock(self.root)
+        self.addCleanup(lock.close)
+        with self.assertRaisesRegex(ValueError, "blokada wykonawcy"):
+            self.worker.execution_lock(lock)
+        self.assertTrue(lock.acquire())
+        lock.close()
+        with self.assertRaisesRegex(ValueError, "blokada wykonawcy"):
+            self.worker.execution_lock(lock)
+        self.assertFalse(WorkerLock.busy(self.root))
+
+    def test_lock_for_another_queue_is_rejected_without_releasing_it(self):
+        foreign = self.root / "inna-kolejka"
+        lock = WorkerLock(foreign)
+        self.addCleanup(lock.close)
+        self.assertTrue(lock.acquire())
+        with self.assertRaisesRegex(ValueError, "blokada wykonawcy"):
+            self.worker.execution_lock(lock)
+        self.assertTrue(WorkerLock.busy(foreign))
+        self.assertFalse(WorkerLock.busy(self.root))
 
 
 class PathSafetyTests(unittest.TestCase):

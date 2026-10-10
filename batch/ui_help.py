@@ -2,21 +2,23 @@
 from __future__ import annotations
 
 import tkinter as tk
+import math
 from tkinter import ttk
 
 
 def status_tags(status):
     from .store import RETRYABLE
     if status in {"done", "draft"}:
-        return (status,)
+        return [status]
     if status in RETRYABLE:
-        return ("error",)
-    return ()
+        return ["error"]
+    return []
 
 
 def sync_tree(tree, visible, rows):
     """Refresh rows while retaining the selection and avoiding repeated inserts."""
     selected = set(tree.selection())
+    scroll = tree.yview()[0]
     wanted = []
     for item, values, tags in rows:
         wanted.append(item)
@@ -27,36 +29,108 @@ def sync_tree(tree, visible, rows):
                 tree.insert("", "end", iid=item, values=values, tags=tags)
             visible[item] = values
     wanted_set = set(wanted)
-    for item in list(visible):
-        if item not in wanted_set:
-            tree.delete(item)
-            del visible[item]
+    for item in set(visible) - wanted_set:
+        tree.delete(item)
+        del visible[item]
     if tree.get_children() != tuple(wanted):
         for index, item in enumerate(wanted):
             tree.move(item, "", index)
-    tree.selection_set(*sorted(selected & wanted_set))
+    remaining = selected & wanted_set
+    if set(tree.selection()) != remaining:
+        tree.selection_set(*sorted(remaining))
+    tree.yview_moveto(scroll)
+
+
+def duration_text(value):
+    try:
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            return "Nieznany"
+        total = round(value)
+        return f"{total // 3600:02}:{total // 60 % 60:02}:{total % 60:02}"
+    except (ValueError, TypeError):
+        return "Nieznany"
+
+
+def next_job(rows, kind, current_id=None):
+    rows = [job for job in rows if job["kind"] == kind]
+    current = next((job for job in rows if job["id"] == current_id and job["status"] == "running"), None)
+    if current:
+        return current
+    return next((job for job in rows if job["enabled"] and
+                 (job["status"] in {"pending", "blocked", "running"} or
+                  (job["status"] == "error" and job["stage"] == "Wymaga działania"))), None)
+
+
+def collapsible_help(parent, variable):
+    box = ttk.Frame(parent)
+    box.pack(fill="x", pady=(4, 0))
+    body = ttk.Label(box, textvariable=variable, wraplength=1100, foreground="#344963")
+    def toggle():
+        if body.winfo_manager():
+            body.pack_forget()
+            button.configure(text="Pokaż podpowiedź")
+        else:
+            body.pack(fill="x", pady=4)
+            button.configure(text="Ukryj podpowiedź")
+    button = ttk.Button(box, text="Pokaż podpowiedź", command=toggle)
+    button.pack(anchor="w")
+    wrap_with_parent(body, 24)
+    return box
 
 
 class Tooltip:
-    def __init__(self, widget, text, status=None, delay=450):
+    active = None
+
+    def __init__(self, widget, text, status=None, delay=800, popup=True):
         self.widget, self.text, self.status, self.delay = widget, text, status, delay
-        self.pending, self.popup = None, None
+        self.pending, self.popup, self.expiry = None, None, None
+        self.allow_popup = popup and not isinstance(widget, (ttk.Treeview, ttk.Notebook, ttk.Progressbar, tk.Text))
+        self.hovered = False
         widget.help_text = text
         widget.tooltip = self
-        widget.bind("<Enter>", self.schedule, add="+")
-        widget.bind("<FocusIn>", self.schedule, add="+")
-        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<Enter>", self.enter, add="+")
+        widget.bind("<Motion>", self.motion, add="+")
+        widget.bind("<FocusIn>", self.describe, add="+")
+        widget.bind("<Leave>", self.leave, add="+")
         widget.bind("<FocusOut>", self.hide, add="+")
         widget.bind("<ButtonPress>", self.hide, add="+")
         widget.bind("<Escape>", self.hide, add="+")
         widget.bind("<F1>", self.show, add="+")
         widget.bind("<Destroy>", self.hide, add="+")
+        widget.bind("<MouseWheel>", self.hide, add="+")
+        widget.winfo_toplevel().bind("<Deactivate>", self.hide, add="+")
+
+    def describe(self, event=None):
+        if self.status is not None:
+            self.status.set(self.text)
+
+    def enter(self, event=None):
+        self.hovered = True
+        self.schedule(event)
+
+    def leave(self, event=None):
+        self.hovered = False
+        self.hide(event)
+
+    def motion(self, event=None):
+        if self.hovered:
+            self.schedule(event)
 
     def schedule(self, event=None):
         self.hide()
-        if self.status is not None:
-            self.status.set(self.text)
-        self.pending = self.widget.after(self.delay, self.show)
+        self.describe(event)
+        if self.allow_popup:
+            self.pending = self.widget.after(self.delay, self.show_hover)
+
+    def show_hover(self):
+        self.pending = None
+        if not self.hovered:
+            return
+        x, y = self.widget.winfo_pointerxy()
+        inside = self.widget.winfo_containing(x, y)
+        if inside is self.widget or (inside is not None and str(inside).startswith(str(self.widget) + ".")):
+            self.show()
 
     def show(self, event=None):
         self.cancel()
@@ -64,10 +138,13 @@ class Tooltip:
             return "break"
         if not self.widget.winfo_exists() or not self.widget.winfo_viewable():
             return None
+        if Tooltip.active and Tooltip.active is not self:
+            Tooltip.active.hide()
+        Tooltip.active = self
         popup = self.popup = tk.Toplevel(self.widget)
         popup.withdraw()
         popup.wm_overrideredirect(True)
-        popup.attributes("-topmost", True)
+        popup.transient(self.widget.winfo_toplevel())
         frame = tk.Frame(popup, bg="#fffbe6", borderwidth=1, relief="solid")
         frame.pack(fill="both", expand=True)
         tk.Label(frame, text=self.text, justify="left", wraplength=420,
@@ -80,6 +157,7 @@ class Tooltip:
             y = self.widget.winfo_rooty() - popup.winfo_reqheight() - 6
         popup.geometry(f"+{max(0, x)}+{max(0, y)}")
         popup.deiconify()
+        self.expiry = self.widget.after(6000, self.hide)
         return "break"
 
     def cancel(self):
@@ -92,12 +170,20 @@ class Tooltip:
 
     def hide(self, event=None):
         self.cancel()
+        if self.expiry:
+            try:
+                self.widget.after_cancel(self.expiry)
+            except tk.TclError:
+                pass
+            self.expiry = None
         if self.popup:
             try:
                 self.popup.destroy()
             except tk.TclError:
                 pass
             self.popup = None
+        if Tooltip.active is self:
+            Tooltip.active = None
 
 
 def help_button(parent, text, command, help_text, status=None, **kwargs):
@@ -116,7 +202,9 @@ HELP = {
     "files": "Dodaje wybrane pliki audio lub wideo z dysku. Oryginały pozostają na miejscu. Po imporcie naciśnij Start.",
     "folder": "Dodaje nagrania z folderu i wszystkich jego podfolderów. Porównuje zawartość plików, aby nie dublować pracy.",
     "speakers": "Otwiera przewodnik: bezpośrednia strona Community-1, token Hugging Face, sprawdzenie dostępu i pobranie. Konfiguracja jest jednorazowa.",
-    "test": "Przetwarza wybrane nagranie do 2 minut i sprawdza zapis wyników. Używa aktualnych opcji UVR i mówców. Nie uruchamia katalogu YouTube.",
+    "test": "Sprawdza do 60 sekund wybranego nagrania z aktualnymi opcjami UVR i mówców. Długiego pliku nie trzeba ciąć. Próba nie uruchamia produkcyjnej kolejki.",
+    "next": "Przewija listę do bieżącego nagrania albo pierwszego włączonego zadania oczekującego. Nie rozpoczyna pracy.",
+    "configuration": "Otwiera ustawienia modeli, UVR i dostępu do YouTube oraz wyniki kontroli konfiguracji.",
     "youtube_access": "Pomaga przy blokadzie YouTube: otwiera film do ręcznego potwierdzenia, pozwala wybrać sesję przeglądarki lub cookies.txt i przetestować jeden link. Nie wznawia kolejki automatycznie.",
     "csv": "Zapisuje status wszystkich nagrań w CSV do otwarcia w Excelu. Nie zmienia źródłowego katalogu XLSX.",
     "guide": "Otwiera krótką instrukcję przycisków i kolejności pierwszego uruchomienia.",

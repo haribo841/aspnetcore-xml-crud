@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path
 import re
 from urllib.parse import parse_qs, urlparse
 
-from .common import digest
+from .common import digest, job_folder
 from .store import now
 
 MEDIA = {".wav", ".mp3", ".mp4", ".mkv", ".webm", ".m4a", ".aac", ".flac",
          ".opus", ".ogg", ".aiff", ".aif", ".wma", ".wmv", ".mov", ".avi",
-         ".m4v", ".mts", ".m2ts", ".ts", ".mpeg", ".mpg", ".3gp"}
+         ".m4v", ".mts", ".m2ts", ".ts", ".mpeg", ".mpg", ".3gp", ".mka", ".oga", ".weba", ".flv", ".mxf", ".vob"}
 
 
 def video_id(url, supplied=""):
@@ -122,32 +123,75 @@ def import_xlsx(store, source):
     return {"rows": len(result), "added": inserted, "drafts": drafts, "sha256": before, "note": note}
 
 
-def import_local(store, paths, progress=lambda message: None):
+def local_checksum(store, path):
+    stat = path.stat()
+    with store.connect() as db:
+        cached = db.execute("SELECT * FROM local_cache WHERE path=?", (str(path),)).fetchone()
+    if cached and cached["size"] == stat.st_size and cached["mtime_ns"] == stat.st_mtime_ns:
+        return stat, cached["sha256"]
+    checksum = digest(path)
+    after = path.stat()
+    if (stat.st_size, stat.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError(f"Plik zmienił się podczas importu: {path}")
+    with store.connect() as db:
+        db.execute("INSERT OR REPLACE INTO local_cache VALUES(?,?,?,?)",
+                   (str(path), stat.st_size, stat.st_mtime_ns, checksum))
+    return stat, checksum
+
+
+def local_entry(store, path, config, output_mode, output_root):
+    from .local_outputs import output_root_for
+    from .media import media_metadata
+    stat, checksum = local_checksum(store, path)
+    metadata = {"sha256": checksum, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    error, duration = "", None
+    if config is not None:
+        try:
+            media = media_metadata(path, config)
+            metadata.update(media)
+            duration = media["duration"]
+        except (ValueError, OSError, RuntimeError) as exc:
+            error = str(exc)
+            metadata["probe_error"] = error
+    base = str(output_root_for(path, store.root, output_mode, output_root)) if output_mode else None
+    return {"identity": "local:" + checksum, "kind": "local", "source": str(path), "title": path.stem,
+            "date": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "duration": duration, "meta": metadata, "output_root": base,
+            "status": "error" if error else "pending", "error": error,
+            "stage": "Walidacja pliku" if error else ""}
+
+
+def import_local(store, paths, progress=lambda message: None, *, config=None, output_mode=None, output_root=""):
+    from .local_outputs import scan_media
     files = set()
+    excluded = [job_folder(store.root, job) for job in store.jobs()]
     for source in paths:
         path = Path(source).resolve(strict=True)
         if path.is_dir():
-            files.update(p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in MEDIA)
-        elif path.suffix.lower() in MEDIA:
+            files.update(scan_media(path, MEDIA, excluded=excluded))
+        elif path.suffix.lower() in MEDIA or config is not None:
             files.add(path)
-    count = 0
+    count, errors = 0, 0
     for index, path in enumerate(sorted(files), 1):
         progress(f"Identyfikacja plików: {index}/{len(files)}: {path.name}")
-        stat = path.stat()
+        entry = local_entry(store, path, config, output_mode, output_root)
+        errors += bool(entry["error"])
+        count += store.add_many([entry])
+    return {"files": len(files), "added": count, "errors": errors}
+
+
+def enrich_local(store, jobs, config):
+    from .media import media_metadata
+    for job in jobs:
+        try:
+            metadata = media_metadata(job["source"], config)
+            error = ""
+        except Exception as exc:
+            metadata, error = {"probe_error": str(exc)}, str(exc)
+        previous = json.loads(job["source_meta"])
+        previous.update(metadata)
         with store.connect() as db:
-            cached = db.execute("SELECT * FROM local_cache WHERE path=?", (str(path),)).fetchone()
-        if cached and cached["size"] == stat.st_size and cached["mtime_ns"] == stat.st_mtime_ns:
-            checksum = cached["sha256"]
-        else:
-            checksum = digest(path)
-            after = path.stat()
-            if (stat.st_size, stat.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-                raise ValueError(f"Plik zmienił się podczas importu: {path}")
-            with store.connect() as db:
-                db.execute("INSERT OR REPLACE INTO local_cache VALUES(?,?,?,?)",
-                           (str(path), stat.st_size, stat.st_mtime_ns, checksum))
-        count += store.add_many([{"identity": "local:" + checksum, "kind": "local",
-                "source": str(path), "title": path.stem,
-                "date": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-                "meta": {"sha256": checksum, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}}])
-    return {"files": len(files), "added": count}
+            db.execute("UPDATE jobs SET duration=?,source_meta=?,updated=? WHERE id=? AND status='pending'",
+                       (metadata.get("duration"), json.dumps(previous, ensure_ascii=False), now(), job["id"]))
+            if error:
+                db.execute("UPDATE jobs SET status='error',stage='Walidacja pliku',error=? WHERE id=? AND status='pending'", (error, job["id"]))

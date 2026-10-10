@@ -1,6 +1,10 @@
 # Walidacja samodzielnego checkoutu
 
-09.10.2026: publikacja przygotowanych napraw CI i Sonar na polecenie użytkownika. Lokalne sprawdzenia i zakres zmian opisano w [raporcie napraw](SONAR-2026-10-08.md). Wyniki GitHub Actions i SonarCloud dla nowego commitu należy sprawdzić osobno po push; wcześniejsze błędy dotyczyły `5c8f960`.
+10.10.2026: przygotowano wspólną publikację czterech poprawek SonarCloud oraz zaakceptowanej rozbudowy UI. Przechodzi 161 testów bez pominięć, także z przypiętym FFmpeg 8.0.1 używanym w CI. Szczegóły i sposób niezależnej weryfikacji zdalnego wyniku: [raport napraw](SONAR-2026-10-10.md).
+
+09.10.2026, usprawnienia UI: lokalnie wdrożono kartę Konfiguracja, nawigację, wybór miejsca wyników i kontrolę formatów. W repozytorium oraz instalacji przechodzą 157 testów bez pominięć. Oba MKV przeszły próby z UVR i bez niego; po wdrożeniu przeszła dodatkowa próba 60 sekund. Zachowano 5059 pozycji i zatrzymaną kolejkę. Zmiany nie zostały ponownie opublikowane. Szczegóły i granice walidacji: [raport UI](UI-2026-10-09.md).
+
+09.10.2026: opublikowano `c0997819b72c903942eeb02904fbdc15d9e1e9e1`. [GitHub Actions](https://github.com/haribo841/kolejka-transkrypcji/actions/runs/37916813578) przeszło: 132 testy, trzy jawne pominięcia prób FFmpeg na runnerze. SonarCloud analizował ten sam commit: liczba zgłoszeń spadła z 72 do 4, bramka bezpieczeństwa przeszła, ale bramka niezawodności pozostaje negatywna. Drobne poprawki czterech pozostałych uwag przygotowano lokalnie, bez kolejnego commitu i pushu. Przechodzi dla nich 132 testy bez pominięć. Szczegóły: [raport napraw](SONAR-2026-10-08.md).
 
 08.10.2026, po publikacji: GitHub Actions zgłosił dwie błędne asercje porównujące alias katalogu Windows ze ścieżką kanoniczną, a SonarCloud odrzucił bramkę bezpieczeństwa. Przygotowano lokalne naprawy i testy regresyjne. Przechodzą 132 testy bez pominięć, także przez alias katalogu tymczasowego, oraz kompilacja, `pip check` i sprawdzenie diff. Szczegóły i granice walidacji: [raport CI i Sonar](SONAR-2026-10-08.md). Poprawki pozostają niezatwierdzone z powodu wykorzystanego dziennego limitu publikacji; status zdalnego CI i Sonar nadal jest negatywny.
 
@@ -32,4 +36,4 @@ Po pobraniu Whispera można jawnie uruchomić walidator infrastruktury Windows:
 
 Wybierz nowy, oddzielny folder. Walidator sprawdza zamknięcie i ponowne otwarcie GUI, przerwanie procesu, wznowienie, czas życia procesu podrzędnego oraz trzygodzinną ciszę. Brak modelu lub próbki zwraca SKIP i kod 2 przed rozpoczęciem prób. Wykonanie może zająć czas i miejsce na dysku. Te próby wyłączają diarizację i nie są oceną jakości mówców ani gwarancją transkrypcji wielogodzinnej rozmowy.
 
-Pełny test Whisper + Community-1 + opcjonalny UVR wykonuje przycisk Próba lokalna po skonfigurowaniu modeli. Jakość polskiego, angielskiego, muzyki, nakładania głosów i łączenia mówców należy sprawdzić na reprezentatywnych nagraniach. Skuteczność dostępu do YouTube wymaga osobnego rzeczywistego testu linku w aplikacji.
+Pełny test Whisper + Community-1 + opcjonalny UVR wykonuje przycisk Sprawdź na fragmencie z bieżącymi ustawieniami. Jakość polskiego, angielskiego, muzyki, nakładania głosów i łączenia mówców należy sprawdzić na reprezentatywnych nagraniach. Skuteczność dostępu do YouTube wymaga osobnego rzeczywistego testu linku w aplikacji.

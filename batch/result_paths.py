@@ -42,12 +42,27 @@ def output_paths(folder, manifest=None):
 
 def assert_output_owner(folder, identity):
     folder = Path(folder)
+    from .local_outputs import OWNER_FILE
+    owner = read_json(folder / OWNER_FILE, {})
+    if owner and owner.get("identity") != identity:
+        raise FileExistsError("Katalog roboczy należy do innego nagrania: " + str(folder))
     manifest = read_json(folder / RESULT_MANIFEST, {})
     if manifest and manifest.get("identity") != identity:
         raise FileExistsError("Katalog zawiera wyniki innego nagrania. Zachowano dotychczasowe pliki: " + str(folder))
     legacy = read_json(folder / "transkrypcja.json", {})
     if legacy and legacy.get("identity") != identity:
         raise FileExistsError("W katalogu istnieje transkrypcja innego nagrania: " + str(folder))
+
+
+def reserve_output(folder, identity):
+    from .local_outputs import OWNER_FILE
+    assert_output_owner(folder, identity)
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    marker = folder / OWNER_FILE
+    if not marker.exists():
+        import json
+        atomic_new_bytes(marker, json.dumps({"identity": identity}, ensure_ascii=False).encode("utf-8"))
 
 
 def unused_paths(folder, stem):

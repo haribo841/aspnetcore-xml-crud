@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -140,6 +141,31 @@ def probe(source, config):
 
 def audio_tracks(source, config):
     return [stream for stream in probe(source, config)["streams"] if stream.get("codec_type") == "audio"]
+
+
+def positive_duration(value):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) and value > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def media_metadata(source, config):
+    data = probe(source, config)
+    streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
+    if not streams:
+        raise MediaError("Plik nie zawiera ścieżki audio. Wybierz nagranie z dźwiękiem.")
+    if any(s.get("codec_name") in {None, "unknown"} for s in streams):
+        raise MediaError("FFprobe nie rozpoznaje kodeka audio tego pliku.")
+    duration = positive_duration(data.get("format", {}).get("duration"))
+    if duration is None:
+        duration = next((value for s in streams if (value := positive_duration(s.get("duration"))) is not None), None)
+    tracks = [{k: s.get(k) for k in ("index", "codec_name", "sample_rate", "channels", "tags")}
+              for s in streams]
+    return {"duration": duration, "audio_tracks": tracks,
+            "has_video": any(s.get("codec_type") == "video" for s in data.get("streams", [])),
+            "container": data.get("format", {}).get("format_name", "")}
 
 
 def decode_progress(process, duration, work, config, progress):

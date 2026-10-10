@@ -158,7 +158,7 @@ class SetupWizard:
         page = self.pages[2]
         self.label(page, "Pobierz model i sprawdź krótkie nagranie", True)
         self.label(page, "Po sprawdzeniu dostępu aplikacja pobierze model. Następnie wybierz własne nagranie "
-                        "do 2 minut do próby Whispera i rozpoznawania mówców. Możesz zamknąć to okno i wrócić później.")
+                        "do próby aktualnego pipeline'u. Przetworzymy do 60 sekund; długiego pliku nie trzeba ciąć. Możesz zamknąć to okno i wrócić później.")
         self.label(page, f"Model: {MODEL_ID}\nMiejsce zapisu: {self.app.config['diar_model']}", foreground="#44546a")
         self.progress_message = tk.StringVar(master=self.dialog, value="Najpierw sprawdź dostęp w kroku 2.")
         ttk.Label(page, textvariable=self.progress_message, wraplength=760, justify="left").pack(anchor="w", fill="x", pady=12)

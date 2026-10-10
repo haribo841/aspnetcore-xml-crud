@@ -16,7 +16,20 @@ import time
 from .paths import child_path, input_file, local_path, output_file, within_root
 
 APP = Path(__file__).resolve().parent.parent
-DEFAULT_ROOT = Path(os.environ.get("KOLEJKA_ROOT", str(Path.home() / "Transkrypcje")))
+
+
+def default_registry(app):
+    value = os.environ.get("KOLEJKA_ROOT")
+    installation = Path(app) / "lokalna-instalacja.json"
+    if not value and installation.is_file():
+        data = json.loads(installation.read_text(encoding="utf-8"))
+        value = data.get("root")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Niepoprawny folder danych w lokalna-instalacja.json.")
+    return local_path(value) if value else Path.home() / "Transkrypcje"
+
+
+DEFAULT_ROOT = default_registry(APP)
 RATE = 16000
 MODEL_REVISION = "0250c28d68c7c10d6b5cb39707e876c0c66ab6f8"
 DIAR_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
@@ -143,7 +156,8 @@ def slug(text, limit=65):
 
 def job_folder(root, job):
     # The path is persisted at first import, so title changes cannot orphan work.
-    return child_path(Path(root) / "wyniki", job["folder"])
+    base = local_path(job["output_root"]) if job.get("output_root") else Path(root) / "wyniki"
+    return child_path(base, job["folder"])
 
 
 def remove_work_file(path, work):

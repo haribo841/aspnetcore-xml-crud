@@ -5,20 +5,20 @@ Po [instalacji zależności i pobraniu Whispera](README.md#instalacja-i-pierwsza
 ## Pierwsze uruchomienie
 
 1. Wybierz **Importuj katalog YouTube** w karcie YouTube albo przejdź do **Kolejka lokalna**, aby dodać folder lub pliki. Import XLSX szuka arkusza `Materiały` i nagłówków `Tytuł`, `Link`, `ID filmu`; dodatkowo rozpoznaje `Data`, `Lp.`, `Typ`, `Status`, `Widoczność`, `Długość` i `Znaczenie daty`. Wiersze bez poprawnego ID/linku pozostają jako szkice. Hiperłącze w komórce Link może prowadzić do filmu, nawet gdy jej tekst jest opisowy. Ponowny import nie tworzy duplikatów ani nie resetuje gotowych nagrań. Kolejka czeka na ręczny Start.
-2. Kliknij **Konfiguracja mówców**. Kreator prowadzi przez trzy zakładki:
+2. Otwórz kartę **Konfiguracja** i kliknij **Konfiguracja Community-1**, jeśli chcesz rozróżniać mówców. Kreator prowadzi przez trzy zakładki:
    - **Dostęp do modelu**: przycisk otwiera dokładnie [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1). To model autora `pyannote`, więc nie szukaj go wśród własnych modeli. Zaloguj się i wypełnij formularz dostępu na stronie modelu. Warunki obejmują udostępnienie danych kontaktowych jego autorom.
    - **Token i sprawdzenie**: na tym samym koncie otwórz **Access Tokens**, wybierz **Create new token** i w sekcji **Token type** zaznacz **Read (zalecany)**. Read wystarcza do pobrania modelu. Write dodaje niepotrzebne tu uprawnienia zapisu, a Fine-grained jest opcjonalnym wariantem z ręcznym doborem uprawnień. Nadaj nazwę, np. `Kolejka transkrypcji`, utwórz token i skopiuj jego wartość zaczynającą się od `hf_`. W kreatorze kliknij **Wklej**, a następnie **Sprawdź dostęp**. Komunikat rozróżnia niepoprawny token, brak zgody/uprawnień i problemy z połączeniem.
-   - **Pobranie i próba**: po udanym sprawdzeniu kliknij **Pobierz model**. Następnie kliknij **Uruchom krótką próbę** i wybierz własne nagranie do 2 minut. Kreator pokazuje etap i pozwala otworzyć wyniki próby. Jeśli model jest już pobrany, próba nie wymaga tokenu.
+   - **Pobranie i próba**: po udanym sprawdzeniu kliknij **Pobierz model**. Przycisk krótkiej próby pozwala wybrać własne nagranie dowolnej długości; program przetworzy do 60 sekund. Kreator pokazuje etap i pozwala otworzyć wyniki próby. Jeśli model jest już pobrany, próba nie wymaga tokenu.
 
    Token nie jest zapisywany w ustawieniach, bazie ani poleceniu procesu. Jest przekazywany przez standardowe wejście procesu pobierającego. Pole tokenu jest czyszczone po rozpoczęciu pobierania lub zamknięciu kreatora.
-3. Pobieranie wykonuje się osobno. Wskaż własną próbkę do 2 minut przez **Próba lokalna** lub przycisk próby w kreatorze. Wyniki znajdziesz w `FOLDER_DANYCH\proba`. Pełna kolejka pozostaje zatrzymana. Przed pierwszym Start z mówcami wymagana jest ukończona próba bieżących rewizji modeli.
-4. Opcjonalnie zaznacz **UVR: transkrybuj wydzielony wokal**. Przycisk **Pobierz model UVR** przygotowuje model bez tokenu. W tym trybie zachowywane są zarówno źródłowe audio, jak i wokal.
+3. W karcie **Konfiguracja** ustaw mówców, UVR i zachowywanie audio. **Pobierz / sprawdź model UVR** przygotowuje model bez tokenu. UVR zachowuje zarówno źródłowe audio, jak i wokal.
+4. Kliknij **Sprawdź na fragmencie**. Program użyje zaznaczonego lokalnego nagrania lub otworzy wybór pliku, a potem przetworzy do 60 sekund z aktualnymi opcjami. Wyniki znajdziesz w `FOLDER_DANYCH\proba`. Pełna kolejka pozostaje zatrzymana. Przed Start wymagana jest zaliczona próba aktualnych ustawień; po zmianie UVR, mówców, modelu lub środowiska wykonaj ją ponownie. Sam komunikat o pobraniu modelu nie potwierdza działania.
 5. Wybierz zakres i naciśnij **Start/Wznów** dla YouTube lub **Start/Wznów lokalne**. Do krótkiego pierwszego przebiegu zaznacz kilka pozycji oraz **Start tylko zaznaczonych**. Ta opcja ogranicza bieżącą sesję bez wyłączania pozostałych materiałów w bazie. Aby później przetwarzać cały zakres, wyłącz ograniczenie do zaznaczonych. Gotowe wyniki pozostają pominięte.
 
 ## Kolejka lokalna
 
 1. Otwórz kartę **Kolejka lokalna**, ewentualnie przez skrót **Uruchom-kolejke-lokalna.vbs**. Wybierz folder lub wpisz jego ścieżkę. Sam wybór zapamiętuje folder, ale nie dodaje nagrań ani nie uruchamia transkrypcji.
-2. Ustaw **Uwzględnij podfoldery** oraz opcjonalnie **Importuj tylko M4A**. Kliknij **Dodaj folder do kolejki**. Przycisk **Dodaj pliki** pozwala wybrać pojedyncze nagrania audio lub wideo.
+2. Ustaw **Podfoldery** oraz opcjonalnie **Tylko M4A**. Wybierz **Wyniki nowych nagrań**: domyślnie **Obok źródła**, alternatywnie folder centralny lub wskazany folder. Kliknij **Dodaj folder**. Przycisk **Dodaj pliki** pozwala wybrać pojedyncze nagrania audio lub wideo.
 3. Import porównuje zawartość SHA-256. Identyczne kopie pod różnymi nazwami oraz już zaimportowane nagrania są pomijane. Lista pokazuje wyłącznie lokalne zadania; wyszukiwanie obejmuje tytuł i ścieżkę źródła. Kolejność pozostaje chronologiczna, według czasu modyfikacji źródła.
 4. Ustaw język lub ścieżkę audio zaznaczonych nagrań, jeśli trzeba. UVR, modele i zachowywanie audio mają wspólne ustawienia dla obu kolejek. Zmień je przed Start; oryginalne pliki i istniejące TXT w folderze źródłowym pozostają bez zmian.
 5. Naciśnij **Start/Wznów lokalne**. Nie zostanie uruchomiony żaden film YouTube. Opcja **Start tylko zaznaczonych** ogranicza sesję, a nie trwałe włączenie nagrań w bazie.
@@ -26,16 +26,27 @@ Po [instalacji zależności i pobraniu Whispera](README.md#instalacja-i-pierwsza
 
 Jedna baza obsługuje jednego wykonawcę. Podczas sesji YouTube lokalny Start jest zablokowany, a podczas sesji lokalnej zablokowany jest Start YouTube. Aby zmienić rodzaj kolejki, zatrzymaj ją po bieżącym nagraniu. **Ponów nieudane lokalne** i lokalny raport CSV obejmują wyłącznie tę kartę. **Obróbka transkrypcji** korzysta z zaznaczenia w ostatnio używanej karcie kolejki.
 
+Miejsce zapisu jest trwałym ustawieniem każdego zadania. **Zmień miejsce wyników** stosuje wybrany sposób zapisu do zaznaczonych nagrań, które nie rozpoczęły przetwarzania. Gotowe i częściowo przetworzone materiały zachowują swoje foldery. Szczegóły listy pokazują osobno źródło i faktyczne wyniki. Własne katalogi wyników, wokale i dane robocze są pomijane podczas skanowania.
+
+Import w tle odczytuje długość i ścieżki audio przez FFprobe. Wspólny FFmpeg obsługuje WAV, MP3, M4A/AAC, FLAC, OGG/Opus, MP4, MKV, WebM, MOV, AVI i pozostałe obsługiwane kodeki. Uszkodzony plik, brak dźwięku albo błędna ścieżka audio otrzymuje osobny błąd i nie zatrzymuje poprawnych nagrań. Oryginały nie są usuwane ani modyfikowane.
+
+## Konfiguracja i potwierdzenie działania
+
+Karta **Konfiguracja** pokazuje statusy Whispera, mówców, UVR, narzędzi i YouTube. **Sprawdzanie** oznacza lekką kontrolę w tle, bez uruchamiania modeli. **Wymaga działania** zawiera przyczynę i odpowiednie ustawienia. **Gotowy do próby** potwierdza obecność plików i środowisk. Zielone **Próba zaliczona** wymaga rzeczywistej próby bieżącej konfiguracji. **Wyłączony** oznacza pomijany etap.
+
+Raport `pierwsza-proba.json` zapisuje datę, wersje, rewizje modeli, urządzenia i opcje. Cyfrowa cisza, przy której Whisper nie został wywołany, nie potwierdza działania modelu. **Otwórz wyniki próby** pozwala ocenić tekst. Dostęp do YouTube sprawdza się osobno w **Dostęp YouTube**; problem z nim nie blokuje kolejki lokalnej. Błąd Start jest zachowany w `ostatni-blad-start.json`, a błędy procesów w logach i statusie okna.
+
 ## Zwykła praca
 
-- Każdy przycisk, filtr i opcja ma podpowiedź po najechaniu myszą. Z klawiatury wybierz element przez **Tab** i użyj **F1**. Opis jest też widoczny w stałym pasku **Podpowiedź** na dole. **Co robią przyciski?** otwiera przewijaną instrukcję w aplikacji.
+- Podpowiedź pojawia się po 800 ms nieruchomego kursora. Ruch, kliknięcie, przewinięcie, opuszczenie kontrolki lub zmiana okna ją zamyka; po sześciu sekundach znika sama. Tab nie otwiera popupu; **F1** wyświetla pomoc wybranej kontrolki. Dłuższy opis jest dostępny przez **Pokaż podpowiedź**, a **Pomoc** otwiera instrukcję przycisków.
+- Zwykły launcher otwiera aktywną kolejkę albo ostatnio używaną kartę kolejki. Lokalny skrót zawsze otwiera lokalną kartę. Lista ustawia bieżące lub pierwsze włączone oczekujące nagranie u góry. **Bieżący / następny** wraca do tego miejsca, a zwykłe odświeżanie zachowuje Twoje zaznaczenie i przewinięcie.
 - **Start/Wznów** przetwarza włączone, oczekujące nagrania YouTube od najstarszych. **Start/Wznów lokalne** obejmuje tylko lokalne pliki. Wyszukiwanie i filtry zmieniają widok; samo filtrowanie nie zmienia zakresu sesji.
 - **Dokończ bieżący i zatrzymaj** kończy cały film: pobranie, opcjonalny UVR, Whisper, mówców oraz eksport. Następny film nie zostanie pobrany.
 - Okno można zamknąć. Pracę wykonuje osobny proces; ponowne otwarcie pokaże jego stan. Podczas przetwarzania automatyczne uśpienie jest wstrzymane, ale ekran może się wyłączyć lub zostać zablokowany. Ręczne uśpienie, wyłączenie zasilania i restart systemu nie są blokowane.
 - Po restarcie komputera sam otwórz aplikację i naciśnij Start. Zapisana kolejka nie uruchamia się automatycznie po zalogowaniu do Windows.
 - **Ponów nieudane** przywraca zaznaczone problematyczne pozycje do oczekujących, a przy braku zaznaczenia wszystkie takie pozycje z danej karty. Nie rozpoczyna pracy.
 - Po globalnej blokadzie YouTube Start ponawia zablokowaną pozycję. Brak modelu lub miejsca na dysku wymaga usunięcia przyczyny. Materiały prywatne, wymagające logowania, trwające transmisje i zaplanowane premiery mają osobne statusy.
-- **Dodaj folder do kolejki** dodaje nagrania w karcie lokalnej i opcjonalnie uwzględnia podfoldery. Pliki lokalne identyfikowane są po SHA-256. Oryginały pozostają na miejscu. Przy zmianie zawartości pliku dodaj go ponownie.
+- **Dodaj folder** dodaje nagrania w karcie lokalnej i opcjonalnie uwzględnia podfoldery. Pliki lokalne identyfikowane są po SHA-256. Oryginały pozostają na miejscu. Przy zmianie zawartości pliku dodaj go ponownie.
 - **Wybierz ścieżkę audio** pokazuje dostępne ścieżki wskazanego pliku lokalnego. Domyślna to pierwsza. **Ustaw język** przyjmuje `auto`, `pl`, `en` i inne kody obsługiwane przez Whisper. Wybór dotyczy zaznaczonych, jeszcze nieukończonych nagrań.
 - **Raport CSV** eksportuje stan do pliku otwieranego w Excelu. Oryginalny XLSX służy wyłącznie do odczytu i może pozostać otwarty w Excelu.
 
@@ -84,7 +95,7 @@ UVR oddziela głos od części tła, ale nie rozdziela automatycznie wszystkich 
 
 ## Wyniki i wznowienie
 
-Każde nagranie ma folder `wyniki\tytuł__stabilny-identyfikator` z plikami:
+Każde nagranie ma osobny folder `tytuł__stabilny-identyfikator` w swoim zapisanym miejscu wyników. Dla YouTube i starszych zadań pozostaje to `FOLDER_DANYCH\wyniki`; dla nowych lokalnych nagrań domyślnie podfolder obok źródła. Zawiera:
 
 - `tytuł__yt-ID_transkrypcja.txt`: czasy i etykiety Mówca 1, Mówca 2 itd.
 - Pliki `.srt` i `.vtt` z tą samą nazwą bazową: napisy z etykietami mówców.
@@ -143,6 +154,6 @@ Przykłady PowerShell, wykonywane w folderze programu:
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-`validate_batch_runtime.py --root NOWY_ODDZIELNY_FOLDER --sample WŁASNA_PRÓBKA --model LOKALNY_MODEL_WHISPER` wykonuje rzeczywiste próby zamknięcia okna, awarii procesu, wznowienia i trzygodzinnej ciszy. [Szczegóły walidacji](docs/WERYFIKACJA.md). Ten test infrastruktury świadomie wyłącza diarizację; pełną próbę modelu wykonuje przycisk Próba lokalna po udostępnieniu Community-1.
+`validate_batch_runtime.py --root NOWY_ODDZIELNY_FOLDER --sample WŁASNA_PRÓBKA --model LOKALNY_MODEL_WHISPER` wykonuje rzeczywiste próby zamknięcia okna, awarii procesu, wznowienia i trzygodzinnej ciszy. [Szczegóły walidacji](docs/WERYFIKACJA.md). Ten test infrastruktury świadomie wyłącza diarizację; pełną próbę bieżącego pipeline'u wykonuje przycisk Sprawdź na fragmencie.
 
 Źródła techniczne: [OpenVINO WhisperPipeline](https://docs.openvino.ai/2026/api/genai_api/_autosummary/openvino_genai.WhisperPipeline.html), [Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), [yt-dlp EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [audio-separator](https://github.com/nomadkaraoke/python-audio-separator), [Ultimate Vocal Remover](https://github.com/Anjok07/ultimatevocalremovergui).

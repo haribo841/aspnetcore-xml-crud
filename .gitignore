@@ -80,3 +80,5 @@ runtime-tests.json
 .vscode/
 Thumbs.db
 desktop.ini
+# Local installation keeps its existing data registry outside this repository.
+/lokalna-instalacja.json

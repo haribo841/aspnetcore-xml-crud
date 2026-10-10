@@ -34,6 +34,8 @@ def argument_parser():
     catalog.add_argument("path", type=Path)
     local = commands.add_parser("add-local")
     local.add_argument("paths", type=Path, nargs="+")
+    local.add_argument("--output", choices=("beside", "central", "custom"), default="beside")
+    local.add_argument("--output-folder", type=Path, help="Folder wyników dla --output custom")
     start = commands.add_parser("start")
     start.add_argument("--kind", choices=("all", "youtube", "local"), default="all", help="Rodzaj nagrań do przetworzenia")
     start.add_argument("--ids", type=int, nargs="+", help="Wyłącznie wskazane identyfikatory wierszy SQLite")
@@ -51,7 +53,8 @@ def open_gui(args, _store):
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     from batch.gui import Window
-    window = Window(args.root)
+    local = getattr(args, "local", False) or getattr(args, "local_folder", None)
+    window = Window(args.root, start_page="local" if local else None)
     if getattr(args, "setup", False):
         window.window.after(250, window.configure_model)
     if getattr(args, "youtube", False):
@@ -90,7 +93,9 @@ def import_catalog(args, store):
 
 def add_local(args, store):
     from batch.importers import import_local
-    print(json.dumps(import_local(store, args.paths, print), ensure_ascii=False, indent=2))
+    from batch.common import settings
+    print(json.dumps(import_local(store, args.paths, print, config=settings(args.root),
+                                 output_mode=args.output, output_root=args.output_folder or ""), ensure_ascii=False, indent=2))
 
 
 def start_queue(args, _store):

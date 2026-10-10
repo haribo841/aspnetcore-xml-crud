@@ -7,19 +7,22 @@ from pathlib import Path
 import queue
 import subprocess
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .common import APP, NO_WINDOW, WorkerLock, application_python, atomic_json, job_folder, read_json, settings
-from .diarization import validate_diarization
-from .importers import import_xlsx
+from .importers import enrich_local, import_xlsx
 from .local_tab import LocalQueueTab
 from .media import audio_tracks
 from .result_paths import output_paths
 from .store import RETRYABLE, STATUSES, Store
 from .transcript_tab import TranscriptTab
-from .ui_help import HELP, Tooltip, help_button, status_tags, sync_tree, wrap_with_parent
+from .ui_help import (HELP, Tooltip, collapsible_help, duration_text, help_button, next_job,
+                      status_tags, sync_tree, wrap_with_parent)
+from .readiness import (ACTION, collect_readiness, file_stamp, readiness_summary, check_destination)
 from .worker import launch, preflight
+from .store import now
 from .youtube_access import SessionError, error_message, preferences as youtube_preferences
 
 
@@ -28,8 +31,8 @@ AUDIO_TRACK_TITLE = 'Ścieżka audio'
 FONT_FAMILY = 'Segoe UI'
 
 
-class Window:
-    def __init__(self, root, tk_root=None):
+class QueueWindow:
+    def __init__(self, root, tk_root=None, start_page=None):
         self.root = Path(root)
         self.store, self.config = Store(root), settings(root)
         self.tk_root = tk_root or tk.Tk()
@@ -38,154 +41,139 @@ class Window:
         self.window.minsize(1220, 760)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.events = queue.Queue()
-        self.visible = {}
-        self.jobs = {}
-        self.selection_queue = "youtube"
-        self.busy_import = False
-        self.pending_filter = None
-        self.setup_dialog = None
-        self.youtube_dialog = None
-        self.guide_dialog = None
-        self.controls = {}
-        self.help_status = tk.StringVar(master=self.window, value="Najedź na dowolny przycisk, aby zobaczyć opis. Pomoc działa też z klawiatury: Tab, następnie F1.")
+        self.visible, self.jobs, self.controls = {}, {}, {}
+        self.session_view = read_json(self.root / "okno-ui.json", {})
+        self.selection_queue = self.session_view.get("queue", "youtube")
+        self.busy_import = self.readiness_busy = self.metadata_busy = self.closing = False
+        self.pending_filter = self.refresh_after = self.events_after = self.navigation_after = None
+        self.setup_dialog = self.youtube_dialog = self.guide_dialog = None
+        self.readiness, self.readiness_key = {}, None
+        self.readiness_checked = 0
+        self.navigation_done = set()
+        self.metadata_attempted = set()
+        self.help_status = tk.StringVar(master=self.window, value="Podpowiedź pojawi się po zatrzymaniu kursora. Tab i F1: pomoc z klawiatury.")
+        self.counts, self.current, self.detail, self.model_state, self.local_model_state = (tk.StringVar(master=self.window) for _ in range(5))
+        self.uvr_enabled = tk.BooleanVar(master=self.window, value=self.config.get("uvr_enabled", False))
+        self.keep_audio = tk.BooleanVar(master=self.window, value=self.config.get("keep_audio", False))
         self.style = ttk.Style(self.window)
         if "vista" in self.style.theme_names():
             self.style.theme_use("vista")
         self.window.option_add("*Font", "{Segoe UI} 10")
+        self.window.bind("<MouseWheel>", lambda event: Tooltip.active.hide() if Tooltip.active else None, add="+")
+        self.window.bind("<Unmap>", lambda event: Tooltip.active.hide() if Tooltip.active else None, add="+")
         self.notebook = ttk.Notebook(self.window)
         self.notebook.pack(fill="both", expand=True)
-        self.queue_page = ttk.Frame(self.notebook)
-        self.local_page = ttk.Frame(self.notebook)
-        self.processing_page = ttk.Frame(self.notebook)
-        self.notebook.add(self.queue_page, text="Kolejka YouTube")
-        self.notebook.add(self.local_page, text="Kolejka lokalna")
-        self.notebook.add(self.processing_page, text="Obróbka transkrypcji")
-        Tooltip(self.notebook, "YouTube i nagrania lokalne mają osobne listy i zakres Start. Obróbka transkrypcji tworzy kopie gotowych tekstów bez oznaczeń mówców.", self.help_status)
+        self.queue_page, self.local_page, self.processing_page, self.config_page = (ttk.Frame(self.notebook) for _ in range(4))
+        for page, title in ((self.queue_page, "Kolejka YouTube"), (self.local_page, "Kolejka lokalna"),
+                            (self.processing_page, "Obróbka transkrypcji"), (self.config_page, "Konfiguracja")):
+            self.notebook.add(page, text=title)
+        Tooltip(self.notebook, "YouTube i pliki lokalne mają oddzielne listy. Konfiguracja jest wspólna.", self.help_status, popup=False)
+        self.build_youtube()
+        self.local_tab = LocalQueueTab(self, self.local_page)
+        self.controls["files"], self.controls["folder"] = self.local_tab.controls["files"], self.local_tab.controls["import_folder"]
+        self.transcript_tab = TranscriptTab(self, self.processing_page)
+        from .config_tab import ConfigurationTab
+        self.config_tab = ConfigurationTab(self, self.config_page)
+        self.notebook.bind("<<NotebookTabChanged>>", self.queue_changed)
+        self.window.bind("<Map>", lambda event: self.schedule_navigation() if event.widget is self.window else None, add="+")
+        self.refresh()
+        control = self.store.control()
+        active = control.get("scope_kind") if control["state"] == "running" and WorkerLock.busy(self.root) else None
+        preferred = start_page or active or self.selection_queue
+        self.notebook.select(self.local_page if preferred == "local" else self.queue_page)
+        self.schedule_navigation()
+        self.events_after = self.window.after(250, self.consume_events)
+
+    def build_youtube(self):
         outer = ttk.Frame(self.queue_page, padding=12)
         outer.pack(fill="both", expand=True)
         top = ttk.Frame(outer)
-        top.pack(fill="x")
-        for title, items in (("1. Dodaj nagrania", (
-                ("import", "Importuj katalog YouTube", self.import_catalog),
-                ("files", "Dodaj pliki", self.add_files), ("folder", "Dodaj folder", self.add_folder))),
-                ("2. Przygotuj modele", (("speakers", "Konfiguracja mówców", self.configure_model),
-                ("test", "Próba lokalna (do 2 min)", self.test_local))),
-                ("Pomoc i raport", (("guide", "Co robią przyciski?", self.show_guide),
-                ("csv", "Raport CSV", self.report)))):
-            group = ttk.LabelFrame(top, text=title, padding=(6, 3))
-            group.pack(side="left", padx=(0, 8))
-            for key, label, action in items:
-                self.button(group, key, label, action).pack(side="left", padx=3, pady=3)
-        ttk.Label(outer, text=f"Wyniki i postęp: {self.root}").pack(anchor="w", pady=(6, 0))
-        self.source_note = tk.StringVar(value="Import nie uruchamia przetwarzania. Kolejność: od najstarszych.")
+        top.pack(fill="x", pady=(0, 6))
+        for key, text, action in (("import", "Importuj katalog YouTube", self.import_catalog),
+                                  ("next", "Bieżący / następny", self.jump_youtube),
+                                  ("configuration", "Konfiguracja", self.open_configuration),
+                                  ("test", "Sprawdź na fragmencie", self.test_local),
+                                  ("youtube_access", "Dostęp YouTube", self.configure_youtube),
+                                  ("csv", "Raport CSV", self.report), ("guide", "Pomoc", self.show_guide)):
+            self.button(top, key, text, action).pack(side="left", padx=(0, 7))
+        self.source_note = tk.StringVar(master=self.window, value="Import nie uruchamia pracy. Kolejność: od najstarszych.")
         with self.store.connect() as db:
             last_import = db.execute("SELECT notes FROM imports ORDER BY id DESC LIMIT 1").fetchone()
             if last_import:
                 self.source_note.set(last_import["notes"])
-        ttk.Label(outer, textvariable=self.source_note, wraplength=1220).pack(anchor="w", pady=(0, 6))
-        youtube_row = ttk.Frame(outer)
-        youtube_row.pack(fill="x", pady=(0, 4))
-        self.button(youtube_row, "youtube_access", "Dostęp YouTube", self.configure_youtube).pack(side="left", padx=(0, 10))
-        self.youtube_state = tk.StringVar(value="YouTube: anonimowo")
-        ttk.Label(youtube_row, textvariable=self.youtube_state).pack(side="left")
-        options_row = ttk.Frame(outer)
-        options_row.pack(fill="x", pady=4)
-        self.uvr_enabled = tk.BooleanVar(value=self.config.get("uvr_enabled", False))
-        self.keep_audio = tk.BooleanVar(value=self.config.get("keep_audio", False))
-        uvr_option = ttk.Checkbutton(options_row, text="UVR: transkrybuj wydzielony wokal", variable=self.uvr_enabled,
-                                    command=self.save_audio_options)
-        uvr_option.pack(side="left", padx=(0, 16))
-        self.add_help(uvr_option, "uvr")
-        keep_option = ttk.Checkbutton(options_row, text="Zachowuj źródłowe audio", variable=self.keep_audio,
-                                     command=self.save_audio_options)
-        keep_option.pack(side="left", padx=(0, 16))
-        self.add_help(keep_option, "keep")
-        self.button(options_row, "uvr_model", "Pobierz model UVR", self.setup_uvr).pack(side="left")
-        ttk.Label(options_row, text="  UVR zachowuje także wokal.flac; zmiany przed Start.").pack(side="left")
-        filter_row = ttk.Frame(outer)
-        filter_row.pack(fill="x", pady=6)
-        self.search, self.status, self.kind = tk.StringVar(), tk.StringVar(value="Wszystkie"), tk.StringVar(value="Wszystkie")
-        self.date_from, self.date_to = tk.StringVar(), tk.StringVar()
-        for key, label, variable, width in (("search", "Szukaj", self.search, 26),
-                                        ("date_from", "Od (RRRR-MM-DD)", self.date_from, 12),
-                                        ("date_to", "Do", self.date_to, 12)):
-            ttk.Label(filter_row, text=label).pack(side="left", padx=(0, 5))
-            entry = ttk.Entry(filter_row, textvariable=variable, width=width)
-            entry.pack(side="left", padx=(0, 12))
-            self.add_help(entry, key)
-        for key, label, variable, values, width in (("status", "Status", self.status, ["Wszystkie", *STATUSES.values()], 22),
-                                         ("type", "Typ", self.kind, ["Wszystkie", "YouTube", "Film", "Transmisja", "Shorts"], 14)):
-            ttk.Label(filter_row, text=label).pack(side="left", padx=(0, 5))
-            choice = ttk.Combobox(filter_row, textvariable=variable, values=values, state="readonly", width=width)
-            choice.pack(side="left", padx=(0, 12))
-            self.add_help(choice, key)
+        ttk.Label(outer, textvariable=self.source_note, wraplength=1220).pack(anchor="w")
+        self.youtube_state = tk.StringVar(master=self.window)
+        ttk.Label(outer, textvariable=self.youtube_state, wraplength=1220, foreground="#596579").pack(anchor="w", pady=(2, 4))
+        ttk.Label(outer, textvariable=self.model_state, wraplength=1220).pack(anchor="w", pady=(0, 6))
+        filters = ttk.Frame(outer)
+        filters.pack(fill="x", pady=(0, 8))
+        self.search, self.date_from, self.date_to = (tk.StringVar(master=self.window) for _ in range(3))
+        self.status = tk.StringVar(master=self.window, value="Wszystkie")
+        self.kind = tk.StringVar(master=self.window, value="Wszystkie")
+        for key, label, variable, width in (("search", "Szukaj", self.search, 27),
+                                            ("date_from", "Od (RRRR-MM-DD)", self.date_from, 12),
+                                            ("date_to", "Do", self.date_to, 12)):
+            ttk.Label(filters, text=label).pack(side="left", padx=(0, 5))
+            field = ttk.Entry(filters, textvariable=variable, width=width)
+            field.pack(side="left", padx=(0, 10))
+            self.add_help(field, key)
+        for key, label, variable, values in (("status", "Status", self.status, ["Wszystkie", *STATUSES.values()]),
+                                             ("type", "Typ", self.kind, ["Wszystkie", "Film", "Transmisja", "Short"])):
+            ttk.Label(filters, text=label).pack(side="left", padx=(0, 5))
+            field = ttk.Combobox(filters, textvariable=variable, values=values, state="readonly", width=18)
+            field.pack(side="left", padx=(0, 10))
+            self.add_help(field, key)
         for variable in (self.search, self.status, self.kind, self.date_from, self.date_to):
             variable.trace_add("write", self.schedule_filter)
-        list_frame = ttk.Frame(outer)
-        list_frame.pack(fill="both", expand=True)
-        columns = ("enabled", "date", "type", "status", "progress", "title", "language", "audio")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="extended", height=6)
-        self.add_help(self.tree, "list")
-        widths = (45, 98, 88, 150, 60, 510, 62, 55)
-        for column, title, width in zip(columns, ("Kolejka", "Data", "Typ", "Status", "Etap %", "Tytuł", "Język", "Audio"), widths):
+        listing = ttk.Frame(outer)
+        listing.pack(fill="both", expand=True)
+        columns = ("enabled", "date", "type", "status", "progress", "duration", "title", "language", "audio")
+        self.tree = ttk.Treeview(listing, columns=columns, show="headings", selectmode="extended", height=12)
+        self.controls["list"] = self.tree
+        Tooltip(self.tree, HELP["list"], self.help_status, popup=False)
+        for column, title, width in zip(columns, ("Kolejka", "Data", "Typ", "Status", "Etap %", "Czas trwania", "Tytuł", "Język", "Audio"),
+                                        (55, 98, 85, 135, 55, 100, 550, 60, 50)):
             self.tree.heading(column, text=title)
             self.tree.column(column, width=width, minwidth=40, stretch=column == "title")
-        vertical = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
-        horizontal = ttk.Scrollbar(list_frame, orient="horizontal", command=self.tree.xview)
+        vertical = ttk.Scrollbar(listing, orient="vertical", command=self.tree.yview)
+        horizontal = ttk.Scrollbar(listing, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
-        list_frame.rowconfigure(0, weight=1)
-        list_frame.columnconfigure(0, weight=1)
+        listing.rowconfigure(0, weight=1)
+        listing.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self.show_detail)
         self.tree.bind("<Double-1>", lambda event: self.open_results())
         self.tree.bind("<Control-a>", self.select_visible)
-        self.tree.tag_configure("done", foreground="#25723b")
-        self.tree.tag_configure("error", foreground="#ae2020")
-        self.tree.tag_configure("draft", foreground="#777777")
-        selection_row = ttk.Frame(outer)
-        selection_row.pack(fill="x", pady=6)
-        ttk.Label(selection_row, text="Wybór nagrań:").pack(side="left", padx=(0, 8))
-        for key, label, action in (("select", "Zaznacz widoczne", self.select_visible),
-                              ("enable", "Włącz do kolejki", lambda: self.enable(True)),
-                              ("disable", "Wyłącz z kolejki", lambda: self.enable(False)),
-                              ("language", "Ustaw język", self.language),
-                              ("track", "Wybierz ścieżkę audio", self.audio_track)):
-            self.button(selection_row, key, label, action).pack(side="left", padx=(0, 6))
-        self.counts, self.current, self.detail, self.model_state = (tk.StringVar() for _ in range(4))
-        ttk.Label(outer, textvariable=self.counts).pack(anchor="w", pady=4)
-        ttk.Label(outer, textvariable=self.current, wraplength=1230).pack(anchor="w")
+        for tag, color in (("done", "#25723b"), ("error", "#ae2020"), ("draft", "#777777")):
+            self.tree.tag_configure(tag, foreground=color)
+        selection = ttk.Frame(outer)
+        selection.pack(fill="x", pady=6)
+        for key, text, action in (("select", "Zaznacz widoczne", self.select_visible),
+                                  ("enable", "Włącz do kolejki", lambda: self.enable(True)),
+                                  ("disable", "Wyłącz z kolejki", lambda: self.enable(False)),
+                                  ("language", "Ustaw język", self.language), ("track", "Wybierz ścieżkę audio", self.audio_track)):
+            self.button(selection, key, text, action).pack(side="left", padx=(0, 6))
+        ttk.Label(outer, textvariable=self.counts).pack(anchor="w")
+        ttk.Label(outer, textvariable=self.current, wraplength=1230).pack(anchor="w", pady=3)
         self.progress = ttk.Progressbar(outer, maximum=100)
-        self.progress.pack(fill="x", pady=6)
-        self.add_help(self.progress, "progress")
-        ttk.Label(outer, textvariable=self.detail, wraplength=1230).pack(anchor="w")
-        ttk.Label(outer, textvariable=self.model_state, wraplength=1230).pack(anchor="w", pady=4)
+        self.progress.pack(fill="x", pady=(0, 4))
+        self.controls["progress"] = self.progress
+        Tooltip(self.progress, HELP["progress"], self.help_status, popup=False)
+        ttk.Label(outer, textvariable=self.detail, wraplength=1230).pack(anchor="w", pady=(0, 5))
         actions = ttk.Frame(outer)
-        actions.pack(fill="x", pady=(8, 0))
-        for key, label, action in (("start", "Start/Wznów", self.start),
-                              ("stop", "Dokończ bieżący i zatrzymaj", self.stop),
-                              ("retry", "Ponów nieudane", self.retry), ("results", "Otwórz wyniki", self.open_results),
-                              ("transcript", "Otwórz TXT", self.open_transcript)):
-            self.button(actions, key, label, action).pack(side="left", padx=(0, 8))
-        self.selected_only = tk.BooleanVar(value=False)
+        actions.pack(fill="x")
+        for key, text, action in (("start", "Start/Wznów", self.start), ("stop", "Dokończ bieżący i zatrzymaj", self.stop),
+                                  ("retry", "Ponów nieudane", self.retry), ("results", "Otwórz wyniki", self.open_results),
+                                  ("transcript", "Otwórz TXT", self.open_transcript)):
+            self.button(actions, key, text, action).pack(side="left", padx=(0, 8))
+        self.selected_only = tk.BooleanVar(master=self.window, value=False)
         selection_option = ttk.Checkbutton(actions, text="Start tylko zaznaczonych", variable=self.selected_only)
         selection_option.pack(side="left")
         self.add_help(selection_option, "selected_only")
-        ttk.Label(outer, text="Zamknięcie okna nie przerywa pracy. Zatrzymanie kończy cały bieżący film. Ctrl/Shift: wybór wielu pozycji.").pack(anchor="w", pady=(8, 0))
-        help_frame = ttk.LabelFrame(outer, text="Podpowiedź", padding=(10, 5), height=80)
-        help_frame.pack(fill="x", pady=(10, 0))
-        help_frame.pack_propagate(False)
-        self.help_label = ttk.Label(help_frame, textvariable=self.help_status, wraplength=1260,
-                                   foreground="#344963", justify="left")
-        self.help_label.pack(fill="both", expand=True)
-        help_frame.bind("<Configure>", lambda event: self.help_label.configure(wraplength=max(300, event.width - 25)))
+        collapsible_help(outer, self.help_status)
         self.wrap_labels(outer)
-        self.local_tab = LocalQueueTab(self, self.local_page)
-        self.transcript_tab = TranscriptTab(self, self.processing_page)
-        self.notebook.bind("<<NotebookTabChanged>>", self.queue_changed)
-        self.refresh()
-        self.events_after = self.window.after(250, self.consume_events)
 
     @property
     def window(self):
@@ -212,6 +200,7 @@ class Window:
             self.window.withdraw()
             self.transcript_tab.on_finished = self.close
             return
+        self.closing = True
         self.transcript_tab.close()
         self.local_tab.close()
         if self.setup_dialog and not self.setup_dialog.closed:
@@ -220,17 +209,123 @@ class Window:
             self.youtube_dialog.close()
         # Cancel only Python callbacks we own. ttk progress bars also schedule
         # native Tcl scripts, which must be stopped by their own widgets.
-        for callback in (self.pending_filter, self.refresh_after, self.events_after):
+        for callback in (self.pending_filter, self.refresh_after, self.events_after, getattr(self, "navigation_after", None)):
             if callback:
                 self.window.after_cancel(callback)
         self.window.destroy()
 
     def queue_changed(self, event=None):
+        previous = self.selection_queue
         page = self.notebook.select()
         if page == str(self.local_page):
             self.selection_queue = "local"
         elif page == str(self.queue_page):
             self.selection_queue = "youtube"
+        if self.selection_queue != previous:
+            atomic_json(self.root / "okno-ui.json", {"queue": self.selection_queue})
+        if hasattr(self, "local_tab"):
+            self.schedule_navigation()
+
+    def open_configuration(self):
+        self.notebook.select(self.config_page)
+
+    def schedule_navigation(self):
+        if self.closing or self.navigation_after:
+            return
+        def run():
+            self.navigation_after = None
+            self.initial_navigation()
+        self.navigation_after = self.window.after_idle(run)
+
+    def initial_navigation(self):
+        kind = "local" if self.notebook.select() == str(self.local_page) else "youtube"
+        if self.notebook.select() not in {str(self.local_page), str(self.queue_page)} or kind in self.navigation_done:
+            return
+        tree = self.local_tab.tree if kind == "local" else self.tree
+        if tree.winfo_ismapped() and tree.get_children():
+            self.navigation_done.add(kind)
+            self.jump_to_next(kind, clear_filters=False)
+
+    def jump_youtube(self):
+        self.jump_to_next("youtube")
+
+    def jump_to_next(self, kind, clear_filters=True):
+        job = next_job(self.jobs.values(), kind, self.store.control().get("current_id"))
+        if job is None:
+            (self.local_tab.note if kind == "local" else self.source_note).set("Nie ma włączonych nagrań oczekujących w tej kolejce.")
+            return
+        tree = self.local_tab.tree if kind == "local" else self.tree
+        item = str(job["id"])
+        if not tree.exists(item) and clear_filters:
+            if kind == "local":
+                self.local_tab.search.set("")
+                self.local_tab.status.set("Wszystkie")
+                self.local_tab.render()
+            else:
+                for variable in (self.search, self.date_from, self.date_to):
+                    variable.set("")
+                self.status.set("Wszystkie")
+                self.kind.set("Wszystkie")
+                self.render_list()
+        if tree.exists(item):
+            tree.selection_set(item)
+            tree.focus(item)
+            tree.see(item)
+            children = tree.get_children()
+            tree.yview_moveto(children.index(item) / len(children))
+
+    def request_readiness(self, force=False):
+        if self.readiness_busy or self.closing:
+            return
+        self.config = settings(self.root)
+        key = tuple(tuple(file_stamp(self.root / name)) for name in
+                    ("ustawienia.json", "pierwsza-proba.json", MODEL_STATE_FILE, "konfiguracja-uvr.json", "youtube-dostep.json"))
+        if not force and key == self.readiness_key and time.monotonic() - self.readiness_checked < 60:
+            return
+        self.readiness_busy = True
+        self.readiness = {}
+        self.readiness_key = key
+        self.readiness_checked = time.monotonic()
+        config = dict(self.config)
+        if hasattr(self, "config_tab"):
+            self.config_tab.checking()
+        def run():
+            try:
+                result = collect_readiness(config, self.root)
+            except Exception as exc:
+                result = {"components": {k: {"status": ACTION, "message": str(exc)} for k in
+                                         ("whisper", "tools", "diarization", "uvr", "youtube")}, "passed": False, "test": {}}
+            self.events.put(("readiness", (config, result)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def enrich_metadata(self):
+        if self.metadata_busy:
+            return
+        jobs = [job for job in self.jobs.values() if job["kind"] == "local" and job["status"] == "pending"
+                and job["duration"] is None and job["id"] not in self.metadata_attempted and Path(job["source"]).is_file()]
+        if not jobs:
+            return
+        self.metadata_attempted.update(job["id"] for job in jobs)
+        self.metadata_busy = True
+        config = dict(self.config)
+        def run():
+            try:
+                enrich_local(self.store, jobs, config)
+            finally:
+                self.events.put(("metadata", None))
+        threading.Thread(target=run, daemon=True).start()
+
+    def save_setting(self, key, value):
+        if WorkerLock.busy(self.root) or WorkerLock.busy(self.root / "konfiguracja"):
+            messagebox.showinfo("Ustawienia sesji", "Najpierw dokończ bieżące nagranie lub próbę i zatrzymaj sesję.", parent=self.window)
+            return False
+        config = settings(self.root)
+        config[key] = value
+        atomic_json(self.root / "ustawienia.json", config)
+        self.config = config
+        self.readiness_key = None
+        self.request_readiness(force=True)
+        return True
 
     def selected(self):
         self.queue_changed()
@@ -276,7 +371,7 @@ class Window:
             day = job["date"][:10]
             item = str(job["id"])
             values = ("Tak" if job["enabled"] else "", day, self.type_of(job), STATUSES[job["status"]],
-                      f"{job['progress']:.0f}", job["title"], job["language"], job["audio_track"] + 1)
+                      f"{job['progress']:.0f}", duration_text(job["duration"]), job["title"], job["language"], job["audio_track"] + 1)
             visible_rows.append((item, values, status_tags(job["status"])))
         sync_tree(self.tree, self.visible, visible_rows)
 
@@ -295,8 +390,10 @@ class Window:
         self.refresh_models()
         self.render_list()
         self.local_tab.refresh(control, alive)
-        self.controls["start"].state(["disabled"] if alive or self.busy_import else ["!disabled"])
+        self.controls["start"].state(["disabled"] if alive or self.busy_import or not readiness_summary(self.readiness, "youtube")[0] else ["!disabled"])
         self.controls["stop"].state(["!disabled"] if alive and scope != "local" else ["disabled"])
+        self.enrich_metadata()
+        self.schedule_navigation()
         self.refresh_after = self.window.after(1200, self.refresh)
 
     def idle_title(self, alive):
@@ -317,6 +414,9 @@ class Window:
             self.progress["value"] = job["progress"]
         else:
             message = control["message"] if scope != "local" else ""
+            failure = read_json(self.root / "ostatni-blad-start.json", {})
+            if not message and failure.get("kind") == "youtube":
+                message = failure.get("message", "")
             if "not a bot" in message.casefold() or "too many requests" in message.casefold():
                 message = error_message(message)
             self.current.set(self.idle_title(alive) + message[:500])
@@ -329,16 +429,12 @@ class Window:
             self.youtube_state.set(f"YouTube: {mode} | przerwa przed filmem: {access['delay_seconds']:g} s | przy blokadzie otwórz Dostęp YouTube")
         except (SessionError, OSError):
             self.youtube_state.set("Sprawdź ustawienia w Dostęp YouTube.")
+        self.request_readiness()
+        self.model_state.set("Konfiguracja YouTube: " + readiness_summary(self.readiness, "youtube")[1])
+        self.local_model_state.set("Konfiguracja lokalna: " + readiness_summary(self.readiness, "local")[1])
         state = read_json(self.root / MODEL_STATE_FILE, {})
-        try:
-            validate_diarization(self.config)
-            message = "Model mówców pobrany. "
-        except Exception:
-            message = "Mówcy: kliknij Konfiguracja mówców u góry, aby przygotować Community-1. "
-        self.model_state.set(message + state.get("message", "")[:500])
-        uvr_state = read_json(self.root / "konfiguracja-uvr.json", {})
-        if uvr_state:
-            self.model_state.set(self.model_state.get() + " | UVR: " + uvr_state.get("message", "")[:180])
+        if state.get("state") == "running":
+            self.config_tab.last_test.set(state.get("message", "Trwa próba lub konfiguracja…"))
 
     def show_detail(self, event=None):
         selected = [int(item) for item in self.tree.selection()]
@@ -374,19 +470,31 @@ class Window:
             event = self.events.get_nowait()
             kind, value = event[:2]
             note = event[2] if len(event) == 3 and event[2] is not None else self.source_note
-            if kind == "finished":
-                self.busy_import = False
-            elif kind == "error":
-                note.set("Operacja przerwana: " + str(value))
-                messagebox.showerror("Nie udało się wykonać operacji", str(value), parent=self.window)
-            elif kind == "progress":
-                note.set(str(value))
-            else:
-                if isinstance(value, dict):
-                    note.set(value.get("note") or f"Import: dodano {value.get('added', 0)}, znaleziono {value.get('files', value.get('rows', 0))}.")
-                else:
-                    note.set(str(value))
+            self.handle_event(kind, value, note)
         self.events_after = self.window.after(250, self.consume_events)
+
+    def handle_event(self, kind, value, note):
+        if kind == "finished":
+            self.busy_import = False
+        elif kind == "readiness":
+            self.readiness_busy = False
+            config, result = value
+            if config == settings(self.root):
+                self.readiness = result
+                self.config_tab.update(result)
+            else:
+                self.readiness_key = None
+        elif kind == "metadata":
+            self.metadata_busy = False
+        elif kind == "error":
+            note.set("Operacja przerwana: " + str(value))
+            messagebox.showerror("Nie udało się wykonać operacji", str(value), parent=self.window)
+        elif kind == "progress":
+            note.set(str(value))
+        elif isinstance(value, dict):
+            note.set(value.get("note") or f"Import: dodano {value.get('added', 0)}, znaleziono {value.get('files', value.get('rows', 0))}.")
+        else:
+            note.set(str(value))
 
     def import_catalog(self):
         path = filedialog.askopenfilename(title="Katalog YouTube", filetypes=[("Arkusz Excel", "*.xlsx")], parent=self.window)
@@ -454,9 +562,18 @@ class Window:
             if not pending:
                 messagebox.showinfo("Kolejka", "Nie ma włączonych nagrań oczekujących w tym zakresie. Nieudane możesz ponowić odpowiednim przyciskiem.", parent=self.window)
                 return
+            check_destination(job_folder(self.root, pending[0]), self.config["min_free_gb"])
             launch(self.root, kind=kind, job_ids=job_ids)
+            atomic_json(self.root / "ostatni-blad-start.json", {"at": now(), "kind": kind, "message": ""})
         except Exception as exc:
+            self.record_start_error(kind, str(exc))
             messagebox.showerror("Kolejka nie została uruchomiona", str(exc), parent=self.window)
+
+    def record_start_error(self, kind, message):
+        from .hf_access import redact
+        message = redact(message)[:2500]
+        atomic_json(self.root / "ostatni-blad-start.json", {"at": now(), "kind": kind, "message": message})
+        (self.local_tab.note if kind == "local" else self.source_note).set("Start przerwany: " + message)
 
     def start_in_progress(self):
         if self.busy_import:
@@ -464,6 +581,10 @@ class Window:
             return True
         if WorkerLock.busy(self.root):
             messagebox.showinfo("Trwa sesja", "Najpierw dokończ bieżące nagranie i zatrzymaj trwającą kolejkę. Start nie zmienia zakresu aktywnej sesji.", parent=self.window)
+            return True
+        if WorkerLock.busy(self.root / "konfiguracja"):
+            self.open_configuration()
+            self.config_tab.last_test.set("Poczekaj na zakończenie bieżącej próby lub konfiguracji modeli.")
             return True
         if self.youtube_dialog and self.youtube_dialog.running:
             if not self.youtube_dialog.closed:
@@ -474,22 +595,16 @@ class Window:
 
     def ready_to_start(self, kind):
         self.config = settings(self.root)
-        if self.config["diarization"]:
-            try:
-                validate_diarization(self.config)
-            except Exception:
-                self.configure_model()
-                return False
-        preflight(self.config, self.root, kind=kind)
-        if not self.config["diarization"]:
-            return True
-        test = read_json(self.root / "pierwsza-proba.json", {})
-        if test.get("passed") and test.get("whisper_revision") == self.config["model_revision"] and test.get("diar_revision") == self.config["diar_revision"]:
-            return True
-        self.configure_model()
-        self.setup_dialog.tabs.select(2)
-        self.setup_dialog.progress_message.set("Przed pierwszym Start wykonaj krótką próbę przyciskiem poniżej. Kolejka filmów pozostanie zatrzymana.")
-        return False
+        result = collect_readiness(self.config, self.root)
+        self.readiness = result
+        self.config_tab.update(result)
+        ready, message = readiness_summary(result, kind)
+        if not ready:
+            self.open_configuration()
+            self.record_start_error(kind, message)
+        else:
+            preflight(self.config, self.root, kind=kind)
+        return ready
 
     def stop(self, kind="youtube"):
         control = self.store.control()
@@ -509,11 +624,34 @@ class Window:
         note = self.local_tab.note if kind == "local" else self.source_note
         note.set(f"Przywrócono do oczekujących: {count}. Naciśnij Start/Wznów.")
 
+    def results_folder(self, ids):
+        if ids:
+            paths = [job_folder(self.root, self.jobs[ident]) for ident in ids]
+            parents = {path.parent for path in paths}
+            if len(paths) > 1 and len(parents) != 1:
+                messagebox.showinfo("Wyniki", "Zaznacz jedno nagranie. Wybrane materiały mają różne miejsca wyników.", parent=self.window)
+                return None
+            return paths[0] if len(paths) == 1 else parents.pop()
+        if self.selection_queue != "local":
+            return self.root / "wyniki"
+        mode, custom = self.local_tab.output_policy()
+        if mode == "custom":
+            return Path(custom)
+        if mode == "beside":
+            if self.local_tab.folder.get().strip():
+                return Path(self.local_tab.folder.get())
+            self.local_tab.note.set("Zaznacz nagranie lub wybierz folder źródłowy.")
+            return None
+        return self.root / "wyniki"
+
     def open_results(self, ids=None):
-        ids = self.selected() if ids is None else ids
-        path = job_folder(self.root, self.jobs[ids[0]]) if len(ids) == 1 else self.root / "wyniki"
-        path.mkdir(parents=True, exist_ok=True)
-        os.startfile(path)
+        path = self.results_folder(self.selected() if ids is None else ids)
+        if path is None:
+            return
+        if path.is_dir():
+            os.startfile(path)
+        else:
+            (self.local_tab.note if self.selection_queue == "local" else self.source_note).set("Wyniki nie zostały jeszcze utworzone: " + str(path))
 
     def open_transcript(self, ids=None):
         ids = self.selected() if ids is None else ids
@@ -533,6 +671,9 @@ class Window:
             self.background(lambda: (self.store.export_csv(path, kind=kind), f"Zapisano raport: {path}")[1], note=note)
 
     def setup_process(self, request):
+        if WorkerLock.busy(self.root):
+            messagebox.showinfo("Konfiguracja", "Najpierw dokończ bieżące nagranie i zatrzymaj kolejkę.", parent=self.window)
+            return False
         if WorkerLock.busy(self.root / "konfiguracja"):
             messagebox.showinfo("Konfiguracja", "Pobieranie lub próba już trwa.", parent=self.window)
             return False
@@ -556,7 +697,7 @@ class Window:
         return True
 
     def save_audio_options(self):
-        if WorkerLock.busy(self.root):
+        if WorkerLock.busy(self.root) or WorkerLock.busy(self.root / "konfiguracja"):
             messagebox.showinfo("Ustawienia sesji", "Najpierw dokończ bieżący film i zatrzymaj kolejkę. Opcje audio zmienisz przed następnym Start.", parent=self.window)
             self.uvr_enabled.set(self.config.get("uvr_enabled", False))
             self.keep_audio.set(self.config.get("keep_audio", False))
@@ -566,8 +707,14 @@ class Window:
         self.config = settings(self.root)
         self.config.update(uvr_enabled=self.uvr_enabled.get(), keep_audio=self.keep_audio.get())
         atomic_json(self.root / "ustawienia.json", self.config)
+        self.readiness_key = None
+        self.request_readiness(force=True)
 
     def setup_uvr(self):
+        if WorkerLock.busy(self.root) or WorkerLock.busy(self.root / "konfiguracja"):
+            self.open_configuration()
+            self.config_tab.last_test.set("Poczekaj na zakończenie bieżącej sesji lub próby.")
+            return
         if WorkerLock.busy(Path(self.config["uvr_model_dir"])):
             return
         python = Path(self.config["uvr_python"])
@@ -582,15 +729,19 @@ class Window:
                 creationflags=NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0))
 
     def test_local(self):
-        try:
-            validate_diarization(self.config)
-        except Exception:
-            self.configure_model()
+        if WorkerLock.busy(self.root):
+            messagebox.showinfo("Próba", "Najpierw dokończ bieżące nagranie i zatrzymaj sesję.", parent=self.window)
             return
-        path = filedialog.askopenfilename(title="Krótka próba (do 2 minut)", parent=self.window)
-        if path and self.setup_process({"test_only": True, "source": path}):
-            self.configure_model()
-            self.setup_dialog.tabs.select(2)
+        ids = self.selected()
+        job = self.jobs.get(ids[0]) if len(ids) == 1 else None
+        path = job["source"] if job and job["kind"] == "local" and Path(job["source"]).is_file() else ""
+        if not path:
+            path = filedialog.askopenfilename(title="Audio lub wideo do próby (odczytamy do 60 sekund)", parent=self.window)
+        if path and self.setup_process({"test_only": True, "source": path,
+                                       "track": job["audio_track"] if job and job["kind"] == "local" else 0,
+                                       "language": job["language"] if job else self.config.get("language", "auto")}):
+            self.open_configuration()
+            self.config_tab.last_test.set("Trwa próba fragmentu. Kolejka pozostaje zatrzymana.")
 
     def configure_model(self):
         from .setup_wizard import SetupWizard
@@ -646,8 +797,12 @@ class Window:
         content.insert("end", "Kolejka lokalna\n", "heading")
         content.insert("end", "Wybierz folder, ustaw podfoldery lub tylko M4A i kliknij Dodaj folder do kolejki. Import porównuje SHA-256, pomija identyczne kopie i nie uruchamia obliczeń. Start/Wznów lokalne obejmuje tylko pliki lokalne, nigdy katalog YouTube. Opcja Start tylko zaznaczonych ogranicza sesję bez wyłączania innych materiałów. Jeden wykonawca obsługuje jedną sesję; aby zmienić kolejkę, dokończ bieżące nagranie i zatrzymaj. Wyniki i punkty wznowienia pozostają w tej samej bazie.\n")
         content.configure(state="disabled")
-        Tooltip(content, "Przewijaj kółkiem myszy lub klawiszami Page Up / Page Down. Tekst możesz zaznaczyć i skopiować.")
+        Tooltip(content, "Przewijaj kółkiem myszy lub klawiszami Page Up / Page Down. Tekst możesz zaznaczyć i skopiować.", popup=False)
         help_button(frame, "Zamknij pomoc", dialog.destroy, "Wraca do kolejki bez zmiany jej stanu.").pack(anchor="e", pady=(10, 0))
 
     def run(self):
         self.window.mainloop()
+
+
+# Preserve the entry point used by existing launchers and embedding code.
+Window = QueueWindow
